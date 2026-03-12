@@ -2735,7 +2735,6 @@ class KaggleApi:
                                     break
                                 out.write(data)
                                 out.flush()  # Ensure data is written to disk
-                                os.utime(outfile, times=(remote_date_timestamp - 1, remote_date_timestamp - 1))
                                 size_read += len(data)
                                 pbar.update(len(data))
                         else:
@@ -2744,7 +2743,6 @@ class KaggleApi:
                                     break
                                 out.write(data)
                                 out.flush()  # Ensure data is written to disk
-                                os.utime(outfile, times=(remote_date_timestamp - 1, remote_date_timestamp - 1))
                                 size_read += len(data)
                                 pbar.update(len(data))
 
