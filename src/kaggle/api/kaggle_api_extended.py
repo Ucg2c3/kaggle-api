@@ -3418,11 +3418,22 @@ class KaggleApi:
             request = ApiListKernelSessionOutputRequest()
             request.user_name = owner_slug
             request.kernel_slug = kernel_slug
-            response = kaggle.kernels.kernels_api_client.list_kernel_session_output(request)
+            try:
+                response = kaggle.kernels.kernels_api_client.list_kernel_session_output(request)
+            except HTTPError as e:
+                if e.response.status_code in (401, 403):
+                    raise ValueError(
+                        f"Cannot access kernel '{kernel}' (Permission 'kernels.get' was denied). "
+                        "The most likely cause is a wrong kernel slug. "
+                        "The benchmark_task_slug returned by get_benchmark_leaderboard differs from the actual kernel slug — "
+                        "use the slug from the notebook URL (kaggle.com/code/owner/KERNEL-SLUG), not from the leaderboard. "
+                        "It can also occur if the notebook is private."
+                    )
+                raise
             token = response.next_page_token
 
         outfiles = []
-        for item in response.files:
+        for item in (response.files or []):
             if compiled_pattern and not compiled_pattern.search(item.file_name):
                 continue
 
@@ -3489,7 +3500,18 @@ class KaggleApi:
             request = ApiGetKernelSessionStatusRequest()
             request.user_name = owner_slug
             request.kernel_slug = kernel_slug
-            return kaggle.kernels.kernels_api_client.get_kernel_session_status(request)
+            try:
+                return kaggle.kernels.kernels_api_client.get_kernel_session_status(request)
+            except HTTPError as e:
+                if e.response.status_code in (401, 403):
+                    raise ValueError(
+                        f"Cannot access kernel '{kernel}' (Permission 'kernels.get' was denied). "
+                        "The most likely cause is a wrong kernel slug. "
+                        "The benchmark_task_slug returned by get_benchmark_leaderboard differs from the actual kernel slug — "
+                        "use the slug from the notebook URL (kaggle.com/code/owner/KERNEL-SLUG), not from the leaderboard. "
+                        "It can also occur if the notebook is private."
+                    )
+                raise
 
     def kernels_status_cli(self, kernel, kernel_opt=None):
         """A client wrapper for kernel_status.
