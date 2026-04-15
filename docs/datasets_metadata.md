@@ -176,24 +176,24 @@ You can specify the following values for `expectedUpdateFrequency`:
 * `hourly`
 
 ## Images
-You can update your dataset image by providing a relative path from your `datasets-metadata.json` to an image file, using the `image` property.
+The recommended way to update your dataset's image is by placing a file named `dataset-cover-image.png` (or `.jpg`, `.jpeg`, `.webp`), as a sibling file to your `datasets-metadata.json`.
 
-For example, if your metadata file and image are located at:
+Example:
 - `/some/path/dataset-metadata.json`
-- `/some/path/image.png`
+- `/some/path/dataset-cover-image.png`
+
+The image file will only be used for dataset metadata, and not be uploaded as a file within your dataset.
+
+### Specifying an image with a relative path
+As an alternative, you can update your dataset image by providing a relative path from your `datasets-metadata.json` to an image file, using the `image` property.
+
+If your files were located at:
+- `/some/path/dataset-metadata.json`
+- `/some/path/to/my-image.jpg`
 
 This property should be specified as:
 ```
-"image": "image.png"
-```
-
-If instead, your files were located at:
-- `/some/path/dataset-metadata.json`
-- `/some/path/alternative/path/to/other-image.jpg`
-
-This property should be specified as:
-```
-"image": "alternative/path/to/other-image.jpg"
+"image": "to/my-image.jpg"
 ```
 
 ### Supported image file types and expected dimensions
