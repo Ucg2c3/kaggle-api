@@ -5814,7 +5814,7 @@ class KaggleApi:
                 if task_info.creation_state in self._PENDING_CREATION_STATES:
                     raise ValueError(f"Task '{task}' is currently being created (pending). Cannot push now.")
             except HTTPError as e:
-                if e.response.status_code != 404:
+                if e.response.status_code not in (403, 404):
                     raise
 
             request = ApiCreateBenchmarkTaskRequest()

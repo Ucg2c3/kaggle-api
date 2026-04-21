@@ -191,10 +191,11 @@ class TestPush:
 
         assert f"Task '{task_name}' pushed." in capsys.readouterr().out
 
-    def test_push_creates_new_task_on_404(self, api, tmp_path, capsys):
-        """A 404 from get_benchmark_task means new task — still creates successfully."""
+    @pytest.mark.parametrize("status_code", [403, 404], ids=["forbidden", "not_found"])
+    def test_push_creates_new_task_without_prompting(self, api, tmp_path, capsys, status_code):
+        """A 403/404 means a new task — push proceeds without confirmation."""
         filepath = _write_task_file(tmp_path)
-        api._mock_benchmarks.get_benchmark_task.side_effect = HTTPError(response=MagicMock(status_code=404))
+        api._mock_benchmarks.get_benchmark_task.side_effect = HTTPError(response=MagicMock(status_code=status_code))
         _setup_create_response(api)
         _push(api, "my-task", filepath)
         assert "Task 'my-task' pushed." in capsys.readouterr().out
@@ -210,7 +211,7 @@ class TestPush:
             _push(api, "my-task", filepath)
 
     def test_push_propagates_server_error(self, api, tmp_path):
-        """Non-404 HTTP errors (e.g. 500) are re-raised, not swallowed."""
+        """Non-403/404 HTTP errors (e.g. 500) are re-raised, not swallowed."""
         filepath = _write_task_file(tmp_path)
         api._mock_benchmarks.get_benchmark_task.side_effect = HTTPError(response=MagicMock(status_code=500))
         with pytest.raises(HTTPError):
