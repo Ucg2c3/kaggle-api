@@ -11,7 +11,9 @@ Organized by command (matching the spec):
 """
 
 import argparse
+import io
 import os
+import zipfile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -53,6 +55,14 @@ def api():
     a._mock_client = mock_client
     a._mock_benchmarks = mock_client.benchmarks.benchmark_tasks_api_client
     return a
+
+
+@pytest.fixture
+def mock_token(api):
+    """Pre-wire the model proxy token response for auth/init tests."""
+    api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
+        _make_token_response()
+    )
 
 
 def _write_task_file(tmp_path, content=DEFAULT_TASK_CONTENT, name="task.py"):
@@ -152,48 +162,34 @@ def _setup_available_models(api, slugs):
     api._mock_client.benchmarks.benchmarks_api_client.list_benchmark_models.return_value = resp
 
 
-def _setup_list_response(api, tasks, paginated_responses=None):
-    """Set up list tasks response.
+def _setup_paginated_response(mock, attr_name, items, paginated_responses=None):
+    """Wire up a paginated API mock.
 
     If *paginated_responses* is provided, it should be a list of
-    (tasks_list, next_page_token) tuples for multi-page scenarios.
-    Otherwise a single-page response is created from *tasks*.
+    (items_list, next_page_token) tuples for multi-page scenarios.
+    Otherwise a single-page response is created from *items*.
     """
     if paginated_responses:
         side_effects = []
-        for page_tasks, token in paginated_responses:
+        for page_items, token in paginated_responses:
             resp = MagicMock()
-            resp.tasks = page_tasks
+            setattr(resp, attr_name, page_items)
             resp.next_page_token = token
             side_effects.append(resp)
-        api._mock_benchmarks.list_benchmark_tasks.side_effect = side_effects
+        mock.side_effect = side_effects
     else:
         resp = MagicMock()
-        resp.tasks = tasks
+        setattr(resp, attr_name, items)
         resp.next_page_token = ""
-        api._mock_benchmarks.list_benchmark_tasks.return_value = resp
+        mock.return_value = resp
 
 
-def _setup_runs_response(api, runs, paginated_responses=None):
-    """Set up runs response.
+def _setup_list_response(api, tasks, **kwargs):
+    _setup_paginated_response(api._mock_benchmarks.list_benchmark_tasks, "tasks", tasks, **kwargs)
 
-    If *paginated_responses* is provided, it should be a list of
-    (runs_list, next_page_token) tuples for multi-page scenarios.
-    Otherwise a single-page response is created from *runs*.
-    """
-    if paginated_responses:
-        side_effects = []
-        for page_runs, token in paginated_responses:
-            resp = MagicMock()
-            resp.runs = page_runs
-            resp.next_page_token = token
-            side_effects.append(resp)
-        api._mock_benchmarks.list_benchmark_task_runs.side_effect = side_effects
-    else:
-        resp = MagicMock()
-        resp.runs = runs
-        resp.next_page_token = ""
-        api._mock_benchmarks.list_benchmark_task_runs.return_value = resp
+
+def _setup_runs_response(api, runs, **kwargs):
+    _setup_paginated_response(api._mock_benchmarks.list_benchmark_task_runs, "runs", runs, **kwargs)
 
 
 # ============================================================
@@ -289,12 +285,38 @@ class TestPush:
     # -- Server edge cases --
 
     @pytest.mark.parametrize("state", [QUEUED, RUNNING], ids=["queued", "running"])
-    def test_push_rejects_pending_task(self, api, tmp_path, state):
-        """Push rejects when the task version is still being created."""
+    def test_push_rejects_pending_task_without_wait(self, api, tmp_path, state):
+        """Push without --wait rejects when task is pending, with a --wait hint."""
         filepath = _write_task_file(tmp_path)
         api._mock_benchmarks.get_benchmark_task.return_value = _make_task(state=state)
-        with pytest.raises(ValueError, match="currently being created"):
+        with pytest.raises(ValueError, match="currently being created") as exc_info:
             _push(api, "my-task", filepath)
+        assert "--wait" in str(exc_info.value)
+
+    @pytest.mark.parametrize("state", [QUEUED, RUNNING], ids=["queued", "running"])
+    def test_push_wait_monitors_pending_then_pushes(self, api, capsys, tmp_path, state):
+        """Push --wait with a pending task waits for existing creation, then pushes new version."""
+        filepath = _write_task_file(tmp_path)
+        _setup_create_response(api, "my-task")
+
+        # Call 1: initial check → pending; Call 2: poll existing → completed;
+        # Call 3: poll new version after push → completed
+        api._mock_benchmarks.get_benchmark_task.side_effect = [
+            _make_task(state=state),
+            _make_task(state=COMPLETED),
+            _make_task(state=COMPLETED),
+        ]
+
+        jt, ctx = _mock_jupytext()
+        with ctx, patch("time.sleep"):
+            api.benchmarks_tasks_push_cli("my-task", filepath, wait=0)
+
+        output = capsys.readouterr().out
+        assert "already being created" in output
+        assert "Pushing new version of 'my-task'" in output
+        assert "Task 'my-task' pushed." in output
+        # Verify the create API was still called (new version pushed)
+        api._mock_benchmarks.create_benchmark_task.assert_called_once()
 
     def test_push_propagates_server_error(self, api, tmp_path):
         """Non-403/404 HTTP errors (e.g. 500) are re-raised, not swallowed."""
@@ -480,13 +502,13 @@ class TestRun:
         assert "Timed out waiting for runs after 30 seconds" in output
 
     def test_run_wait_shows_errored_runs(self, api, capsys):
-        """ERRORED runs display with ERRORED label."""
+        """ERRORED runs display with ERRORED label and raise ValueError."""
         _setup_completed_task(api)
         _setup_batch_schedule(api, [_make_run_result()])
         api._mock_benchmarks.list_benchmark_task_runs.return_value = MagicMock(
             runs=[_make_run(state=RUN_ERRORED)], next_page_token=""
         )
-        with patch("time.sleep"):
+        with patch("time.sleep"), pytest.raises(ValueError, match="run\(s\) failed"):
             api.benchmarks_tasks_run_cli("my-task", ["gemini-pro"], wait=0)
         assert "gemini-pro: ERRORED" in capsys.readouterr().out
 
@@ -550,6 +572,14 @@ class TestList:
         output = capsys.readouterr().out
         assert "Task" in output
         # No task rows
+        assert "my-task" not in output
+
+    def test_list_none_tasks_field(self, api, capsys):
+        """Server may return None for the tasks field instead of []."""
+        _setup_list_response(api, None)
+        api.benchmarks_tasks_list_cli()
+        output = capsys.readouterr().out
+        assert "Task" in output
         assert "my-task" not in output
 
     def test_list_table_format(self, api, capsys):
@@ -619,7 +649,7 @@ class TestStatus:
         assert "https://www.kaggle.com/benchmarks/runs/42" not in output
 
     def test_status_errored_run_shows_error_message(self, api, capsys):
-        """ERRORED runs with error_message append ' | Error: ...'."""
+        """ERRORED runs show error in a dedicated section below the table."""
         api._mock_benchmarks.get_benchmark_task.return_value = _make_task()
         _setup_runs_response(
             api,
@@ -627,7 +657,9 @@ class TestStatus:
         )
         api.benchmarks_tasks_status_cli("my-task")
         output = capsys.readouterr().out
-        assert "| Error: OOM" in output
+        assert "Errors:" in output
+        assert "[gemma-2b]" in output
+        assert "OOM" in output
 
     def test_status_pagination(self, api, capsys):
         """Status fetches all pages of runs."""
@@ -654,33 +686,46 @@ class TestStatus:
 class TestDownload:
     """``kaggle benchmarks tasks download <task> [-m <model> ...] [-o <dir>]``"""
 
-    def test_download_to_specific_output(self, api, capsys):
-        _setup_runs_response(api, [_make_run()])
+    def _mock_download(self, api):
+        """Mock download_file, zipfile.ZipFile, and os.remove for download tests."""
+        _setup_completed_task(api)
         api._mock_benchmarks.download_benchmark_task_run_output.return_value = MagicMock()
         api.download_file = MagicMock()
-        api.benchmarks_tasks_download_cli("my-task", output="my_output_dir")
+
+    @pytest.mark.parametrize("status_code", [403, 404], ids=["forbidden", "not_found"])
+    def test_download_task_not_found(self, api, status_code):
+        """Download gives friendly error when task doesn't exist (403/404)."""
+        api._mock_benchmarks.get_benchmark_task.side_effect = HTTPError(response=MagicMock(status_code=status_code))
+        with pytest.raises(ValueError, match="not found"):
+            api.benchmarks_tasks_download_cli("no-such-task")
+
+    def test_download_to_specific_output(self, api, capsys):
+        _setup_runs_response(api, [_make_run()])
+        self._mock_download(api)
+        with patch("zipfile.ZipFile"), patch("os.remove"):
+            api.benchmarks_tasks_download_cli("my-task", output="my_output_dir")
         output = capsys.readouterr().out
         assert "Downloading output for run" in output
         assert "Downloaded output for gemini-pro to" in output
         assert "my_output_dir" in output
 
     def test_download_default_output_path(self, api, capsys):
-        """Default output directory is ./<task>/output."""
+        """Default output is ./{task}/{model}/{run_id}.zip."""
         _setup_runs_response(api, [_make_run(run_id=1)])
-        api._mock_benchmarks.download_benchmark_task_run_output.return_value = MagicMock()
-        api.download_file = MagicMock()
-        api.benchmarks_tasks_download_cli("my-task")
-        # Check the outfile passed to download_file
+        self._mock_download(api)
+        with patch("zipfile.ZipFile"), patch("os.remove"):
+            api.benchmarks_tasks_download_cli("my-task")
+        # download_file receives the .zip path
         call_args = api.download_file.call_args
-        outfile = call_args[0][1]
-        expected = os.path.join(".", "my-task", "output", "gemini-pro_1")
-        assert outfile == expected
+        zippath = call_args[0][1]
+        expected = os.path.join(".", "my-task", "gemini-pro", "1.zip")
+        assert zippath == expected
 
     def test_download_with_model_filter(self, api, capsys):
         _setup_runs_response(api, [_make_run()])
-        api._mock_benchmarks.download_benchmark_task_run_output.return_value = MagicMock()
-        api.download_file = MagicMock()
-        api.benchmarks_tasks_download_cli("my-task", model="gemini-pro")
+        self._mock_download(api)
+        with patch("zipfile.ZipFile"), patch("os.remove"):
+            api.benchmarks_tasks_download_cli("my-task", model="gemini-pro")
         request = api._mock_benchmarks.list_benchmark_task_runs.call_args[0][0]
         assert request.model_version_slugs == ["gemini-pro"]
 
@@ -694,9 +739,9 @@ class TestDownload:
                 _make_run(model="done-model", state=RUN_COMPLETED, run_id=3),
             ],
         )
-        api._mock_benchmarks.download_benchmark_task_run_output.return_value = MagicMock()
-        api.download_file = MagicMock()
-        api.benchmarks_tasks_download_cli("my-task")
+        self._mock_download(api)
+        with patch("zipfile.ZipFile"), patch("os.remove"):
+            api.benchmarks_tasks_download_cli("my-task")
         # Only the completed run should be downloaded
         assert api._mock_benchmarks.download_benchmark_task_run_output.call_count == 1
         output = capsys.readouterr().out
@@ -704,12 +749,54 @@ class TestDownload:
         assert "queued-model" not in output
         assert "running-model" not in output
 
+    def test_download_no_runs_shows_message(self, api, capsys):
+        """No runs at all prints a helpful message with run command hint."""
+        _setup_completed_task(api)
+        _setup_runs_response(api, [])
+        api.benchmarks_tasks_download_cli("my-task", model="nonexistent-model")
+        output = capsys.readouterr().out
+        assert "No runs found for task 'my-task'" in output
+        assert "kaggle b t run my-task" in output
+
+    def test_download_all_pending_shows_message(self, api, capsys):
+        """All runs still in progress prints a status hint."""
+        _setup_completed_task(api)
+        _setup_runs_response(
+            api,
+            [
+                _make_run(state=RUN_QUEUED, run_id=1),
+                _make_run(state=RUN_RUNNING, run_id=2),
+            ],
+        )
+        api.benchmarks_tasks_download_cli("my-task")
+        output = capsys.readouterr().out
+        assert "No downloadable runs yet" in output
+        assert "2 run(s) still in progress" in output
+        assert "kaggle b t status my-task" in output
+
+    def test_download_skips_existing_output(self, api, capsys, tmp_path):
+        """Already-downloaded runs are skipped without making API calls."""
+        _setup_runs_response(api, [_make_run(run_id=42)])
+        self._mock_download(api)
+        outdir = str(tmp_path / "out")
+        # Pre-create the output directory to simulate a previous download
+        existing = os.path.join(outdir, "my-task", "gemini-pro", "42")
+        os.makedirs(existing)
+
+        api.benchmarks_tasks_download_cli("my-task", output=outdir)
+
+        output = capsys.readouterr().out
+        assert "Skipping gemini-pro (run 42)" in output
+        assert "already downloaded" in output
+        # No download API call should have been made
+        api._mock_benchmarks.download_benchmark_task_run_output.assert_not_called()
+
     def test_download_includes_errored_runs(self, api, capsys):
         """ERRORED runs are also downloadable per spec."""
         _setup_runs_response(api, [_make_run(state=RUN_ERRORED)])
-        api._mock_benchmarks.download_benchmark_task_run_output.return_value = MagicMock()
-        api.download_file = MagicMock()
-        api.benchmarks_tasks_download_cli("my-task")
+        self._mock_download(api)
+        with patch("zipfile.ZipFile"), patch("os.remove"):
+            api.benchmarks_tasks_download_cli("my-task")
         assert api._mock_benchmarks.download_benchmark_task_run_output.call_count == 1
 
     def test_download_pagination(self, api, capsys):
@@ -722,10 +809,190 @@ class TestDownload:
                 ([_make_run(model="gemini-2", run_id=2)], ""),
             ],
         )
-        api._mock_benchmarks.download_benchmark_task_run_output.return_value = MagicMock()
-        api.download_file = MagicMock()
-        api.benchmarks_tasks_download_cli("my-task")
+        self._mock_download(api)
+        with patch("zipfile.ZipFile"), patch("os.remove"):
+            api.benchmarks_tasks_download_cli("my-task")
         assert api._mock_benchmarks.download_benchmark_task_run_output.call_count == 2
+
+    def test_download_extracts_zip_and_cleans_up(self, api, capsys, tmp_path):
+        """Download extracts zip into a directory and removes the zip file."""
+        _setup_completed_task(api)
+        _setup_runs_response(api, [_make_run(run_id=42)])
+        api._mock_benchmarks.download_benchmark_task_run_output.return_value = MagicMock()
+
+        outdir = str(tmp_path / "out")
+        zip_path = os.path.join(outdir, "my-task", "gemini-pro", "42.zip")
+
+        # Make download_file create a real zip so extraction works
+        def fake_download(response, outfile, http_client, quiet=False):
+            os.makedirs(os.path.dirname(outfile), exist_ok=True)
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                zf.writestr("output.txt", "hello world")
+            with open(outfile, "wb") as f:
+                f.write(buf.getvalue())
+
+        api.download_file = MagicMock(side_effect=fake_download)
+
+        api.benchmarks_tasks_download_cli("my-task", output=outdir)
+
+        # Verify extraction happened: {output}/{task}/{model}/{run_id}/
+        extracted_dir = os.path.join(outdir, "my-task", "gemini-pro", "42")
+        assert os.path.isdir(extracted_dir)
+        assert os.path.isfile(os.path.join(extracted_dir, "output.txt"))
+        with open(os.path.join(extracted_dir, "output.txt")) as f:
+            assert f.read() == "hello world"
+        # Verify zip was cleaned up
+        assert not os.path.exists(zip_path)
+
+    def test_download_model_slug_at_sign_fallback(self, api, capsys):
+        """Model filter matches proxy-style slugs via @→- replacement.
+
+        The server may return ``model_version_slug`` in the proxy format
+        (e.g. ``anthropic/claude-sonnet-4-6@default``) while the user filters
+        by the display slug (``claude-sonnet-4-6-default``).  The client-side
+        fallback in ``_fetch_task_runs`` should still include such runs.
+        """
+        _setup_runs_response(
+            api,
+            [_make_run(model="anthropic/claude-sonnet-4-6@default", run_id=10)],
+        )
+        self._mock_download(api)
+        with patch("zipfile.ZipFile"), patch("os.remove"):
+            api.benchmarks_tasks_download_cli("my-task", model="claude-sonnet-4-6-default")
+        # The run should NOT have been filtered out
+        assert api._mock_benchmarks.download_benchmark_task_run_output.call_count == 1
+
+    def test_download_bad_zip_keeps_file_and_continues(self, api, capsys, tmp_path):
+        """Corrupt zip prints a warning, keeps the raw file, and continues."""
+        _setup_completed_task(api)
+        _setup_runs_response(
+            api,
+            [
+                _make_run(model="bad-model", run_id=10),
+                _make_run(model="good-model", run_id=11),
+            ],
+        )
+        api._mock_benchmarks.download_benchmark_task_run_output.return_value = MagicMock()
+
+        outdir = str(tmp_path / "out")
+
+        call_count = 0
+
+        def fake_download(response, outfile, http_client, quiet=False):
+            nonlocal call_count
+            os.makedirs(os.path.dirname(outfile), exist_ok=True)
+            call_count += 1
+            if call_count == 1:
+                # First download: write garbage (not a valid zip)
+                with open(outfile, "wb") as f:
+                    f.write(b"this is not a zip")
+            else:
+                # Second download: write a valid zip
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w") as zf:
+                    zf.writestr("result.txt", "ok")
+                with open(outfile, "wb") as f:
+                    f.write(buf.getvalue())
+
+        api.download_file = MagicMock(side_effect=fake_download)
+
+        api.benchmarks_tasks_download_cli("my-task", output=outdir)
+
+        output = capsys.readouterr().out
+        # Bad zip: warning printed, raw file kept
+        assert "not a valid zip archive" in output
+        bad_zip_path = os.path.join(outdir, "my-task", "bad-model", "10.zip")
+        assert os.path.isfile(bad_zip_path)
+        # Good zip: extracted successfully
+        good_dir = os.path.join(outdir, "my-task", "good-model", "11")
+        assert os.path.isdir(good_dir)
+        assert os.path.isfile(os.path.join(good_dir, "result.txt"))
+        assert "Downloaded output for good-model to" in output
+
+
+# ============================================================
+# download_file (Content-Length handling)
+# ============================================================
+
+
+class TestDownloadFile:
+    """Tests for ``download_file`` handling of Content-Length header."""
+
+    def _make_response(self, content=b"test data", headers=None, url="http://example.com/file"):
+        """Build a mock requests.Response-like object."""
+        resp = MagicMock()
+        default_headers = {"Last-Modified": "Mon, 01 Jan 2024 00:00:00 GMT"}
+        if headers:
+            default_headers.update(headers)
+        resp.headers = default_headers
+        resp.url = url
+        resp.request.method = "GET"
+        resp.request.headers = {}
+        resp.iter_content = MagicMock(return_value=iter([content]))
+        # Make type().__name__ return something other than "HTTPResponse"
+        type(resp).__name__ = "Response"
+        return resp
+
+    def test_download_file_with_content_length(self, api, tmp_path):
+        """Normal download with Content-Length header works and verifies size."""
+        content = b"hello world"
+        resp = self._make_response(
+            content=content,
+            headers={"Content-Length": str(len(content))},
+        )
+        outfile = str(tmp_path / "out" / "test.txt")
+        api.download_file(resp, outfile, MagicMock(), quiet=True)
+        assert os.path.isfile(outfile)
+        with open(outfile, "rb") as f:
+            assert f.read() == content
+
+    def test_download_file_missing_content_length(self, api, tmp_path):
+        """Chunked response (no Content-Length) downloads without crashing."""
+        content = b"chunked data"
+        resp = self._make_response(
+            content=content,
+            headers={"Transfer-Encoding": "chunked"},
+        )
+        outfile = str(tmp_path / "out" / "chunked.bin")
+        api.download_file(resp, outfile, MagicMock(), quiet=True)
+        assert os.path.isfile(outfile)
+        with open(outfile, "rb") as f:
+            assert f.read() == content
+
+    def test_download_file_missing_content_length_skips_size_check(self, api, tmp_path):
+        """When Content-Length is absent, size verification is skipped (no ValueError)."""
+        content = b"data"
+        resp = self._make_response(content=content)
+        # No Content-Length in headers at all
+        outfile = str(tmp_path / "out" / "nosize.bin")
+        api.download_file(resp, outfile, MagicMock(), quiet=True)
+        # Should succeed without ValueError about size mismatch
+        assert os.path.isfile(outfile)
+
+
+# ============================================================
+# Models
+# ============================================================
+
+
+class TestModels:
+    """``kaggle benchmarks tasks models``"""
+
+    def test_models_lists_available(self, api, capsys):
+        _setup_available_models(api, ["gemini-pro", "gemma-2b"])
+        api.benchmarks_tasks_models_cli()
+        output = capsys.readouterr().out
+        assert "Slug" in output
+        assert "Display Name" in output
+        assert "gemini-pro" in output
+        assert "gemma-2b" in output
+
+    def test_models_empty(self, api, capsys):
+        _setup_available_models(api, [])
+        api.benchmarks_tasks_models_cli()
+        output = capsys.readouterr().out
+        assert "No benchmark models available" in output
 
 
 # ============================================================
@@ -868,6 +1135,7 @@ class TestCliArgParsing:
         args = self._parse("benchmarks init")
         assert args.no_confirm is False
         assert args.env_file == ".env"
+        assert args.example_file == "example_task.py"
 
     def test_parse_benchmarks_init_yes(self):
         args = self._parse("benchmarks init -y")
@@ -876,6 +1144,10 @@ class TestCliArgParsing:
     def test_parse_benchmarks_init_env_file(self):
         args = self._parse("benchmarks init --env-file custom.env")
         assert args.env_file == "custom.env"
+
+    def test_parse_benchmarks_init_example_file(self):
+        args = self._parse("benchmarks init --example-file my_task.py")
+        assert args.example_file == "my_task.py"
 
 
 # ============================================================
@@ -900,10 +1172,7 @@ def _make_token_response(
 class TestBenchmarksAuth:
     """Tests for ``kaggle benchmarks auth``."""
 
-    def test_writes_env_file_with_yes_flag(self, api, capsys, tmp_path):
-        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
-            _make_token_response()
-        )
+    def test_writes_env_file_with_yes_flag(self, api, mock_token, capsys, tmp_path):
         env_file = str(tmp_path / ".env")
         api.benchmarks_auth_cli(no_confirm=True, env_file=env_file)
         content = (tmp_path / ".env").read_text()
@@ -915,10 +1184,7 @@ class TestBenchmarksAuth:
         assert "kaggle-benchmarks:cool-token" not in out
         assert "have been written to" in out
 
-    def test_aborted_on_no_confirm(self, api, capsys, tmp_path):
-        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
-            _make_token_response()
-        )
+    def test_aborted_on_no_confirm(self, api, mock_token, capsys, tmp_path):
         env_file = str(tmp_path / ".env")
         with patch("builtins.input", return_value="no"):
             api.benchmarks_auth_cli(no_confirm=False, env_file=env_file)
@@ -927,10 +1193,7 @@ class TestBenchmarksAuth:
         assert "MODEL_PROXY_URL" in out
         assert "have been written to" not in out
 
-    def test_confirmed_on_yes(self, api, capsys, tmp_path):
-        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
-            _make_token_response()
-        )
+    def test_confirmed_on_yes(self, api, mock_token, capsys, tmp_path):
         env_file = str(tmp_path / ".env")
         with patch("builtins.input", return_value="yes"):
             api.benchmarks_auth_cli(no_confirm=False, env_file=env_file)
@@ -938,10 +1201,7 @@ class TestBenchmarksAuth:
         out = capsys.readouterr().out
         assert "have been written to" in out
 
-    def test_appends_to_existing_file(self, api, capsys, tmp_path):
-        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
-            _make_token_response()
-        )
+    def test_appends_to_existing_file(self, api, mock_token, capsys, tmp_path):
         env_file = tmp_path / ".env"
         env_file.write_text("EXISTING_VAR=hello\n")
         api.benchmarks_auth_cli(no_confirm=True, env_file=str(env_file))
@@ -949,10 +1209,7 @@ class TestBenchmarksAuth:
         assert content.startswith("EXISTING_VAR=hello\n")
         assert "MODEL_PROXY_URL=https://mp-staging.kaggle.net/models/openapi\n" in content
 
-    def test_custom_env_file(self, api, capsys, tmp_path):
-        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
-            _make_token_response()
-        )
+    def test_custom_env_file(self, api, mock_token, capsys, tmp_path):
         env_file = str(tmp_path / "custom.env")
         api.benchmarks_auth_cli(no_confirm=True, env_file=env_file)
         assert (tmp_path / "custom.env").exists()
@@ -968,10 +1225,7 @@ class TestBenchmarksAuth:
 class TestBenchmarksInit:
     """Tests for ``kaggle benchmarks init``."""
 
-    def test_writes_all_vars(self, api, capsys, tmp_path):
-        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
-            _make_token_response()
-        )
+    def test_writes_all_vars(self, api, mock_token, capsys, tmp_path):
         env_file = str(tmp_path / ".env")
         example_file = str(tmp_path / "example_task.py")
         api.benchmarks_init_cli(no_confirm=True, env_file=env_file, example_file=example_file)
@@ -987,10 +1241,7 @@ class TestBenchmarksInit:
         assert "LLM_DEFAULT=google/gemini-3-flash-preview" in out
         assert "have been written to" in out
 
-    def test_writes_example_file(self, api, capsys, tmp_path):
-        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
-            _make_token_response()
-        )
+    def test_writes_example_file(self, api, mock_token, capsys, tmp_path):
         env_file = str(tmp_path / ".env")
         example_file = str(tmp_path / "example_task.py")
         api.benchmarks_init_cli(no_confirm=True, env_file=env_file, example_file=example_file)
@@ -1000,10 +1251,7 @@ class TestBenchmarksInit:
         out = capsys.readouterr().out
         assert "Example benchmark task file has been written to" in out
 
-    def test_writes_reference_file(self, api, capsys, tmp_path):
-        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
-            _make_token_response()
-        )
+    def test_writes_reference_file(self, api, mock_token, capsys, tmp_path):
         env_file = str(tmp_path / ".env")
         example_file = str(tmp_path / "example_task.py")
         api.benchmarks_init_cli(no_confirm=True, env_file=env_file, example_file=example_file)
@@ -1013,12 +1261,9 @@ class TestBenchmarksInit:
         assert "kaggle-benchmarks Task Syntax Reference" in content
         out = capsys.readouterr().out
         assert "Syntax reference has been written to" in out
-        assert "@kaggle_benchmarks_reference.md" in out
+        assert "kaggle_benchmarks_reference.md" in out
 
-    def test_skips_reference_file_if_exists(self, api, capsys, tmp_path):
-        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
-            _make_token_response()
-        )
+    def test_skips_reference_file_if_exists(self, api, mock_token, capsys, tmp_path):
         ref_file = tmp_path / "kaggle_benchmarks_reference.md"
         ref_file.write_text("existing content\n")
         env_file = str(tmp_path / ".env")
@@ -1028,10 +1273,7 @@ class TestBenchmarksInit:
         out = capsys.readouterr().out
         assert "Reference file already exists" in out
 
-    def test_skips_example_file_if_exists(self, api, capsys, tmp_path):
-        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
-            _make_token_response()
-        )
+    def test_skips_example_file_if_exists(self, api, mock_token, capsys, tmp_path):
         example_file = tmp_path / "example_task.py"
         example_file.write_text("existing content\n")
         env_file = str(tmp_path / ".env")
@@ -1040,30 +1282,21 @@ class TestBenchmarksInit:
         out = capsys.readouterr().out
         assert "already exists" in out
 
-    def test_custom_example_file(self, api, capsys, tmp_path):
-        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
-            _make_token_response()
-        )
+    def test_custom_example_file(self, api, mock_token, capsys, tmp_path):
         env_file = str(tmp_path / ".env")
         example_file = str(tmp_path / "my_task.py")
         api.benchmarks_init_cli(no_confirm=True, env_file=env_file, example_file=example_file)
         content = (tmp_path / "my_task.py").read_text()
         assert "import kaggle_benchmarks as kbench" in content
 
-    def test_aborted_on_no_confirm(self, api, capsys, tmp_path):
-        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
-            _make_token_response()
-        )
+    def test_aborted_on_no_confirm(self, api, mock_token, capsys, tmp_path):
         env_file = str(tmp_path / ".env")
         example_file = str(tmp_path / "example_task.py")
         with patch("builtins.input", return_value="no"):
             api.benchmarks_init_cli(no_confirm=False, env_file=env_file, example_file=example_file)
         assert not (tmp_path / ".env").exists()
 
-    def test_appends_to_existing_file(self, api, capsys, tmp_path):
-        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
-            _make_token_response()
-        )
+    def test_appends_to_existing_file(self, api, mock_token, capsys, tmp_path):
         env_file = tmp_path / ".env"
         env_file.write_text("EXISTING_VAR=hello\n")
         example_file = str(tmp_path / "example_task.py")
@@ -1071,3 +1304,162 @@ class TestBenchmarksInit:
         content = env_file.read_text()
         assert content.startswith("EXISTING_VAR=hello\n")
         assert "LLM_DEFAULT=google/gemini-3-flash-preview\n" in content
+
+
+# ============================================================
+# Task Name Detection
+# ============================================================
+
+
+class TestGetTaskNamesFromFile:
+    """Tests for ``_get_task_names_from_file`` static method."""
+
+    @pytest.mark.parametrize(
+        "source, expected",
+        [
+            # keyword arg
+            ('@task(name="My Task")\ndef evaluate(): pass\n', ["My Task"]),
+            # positional arg
+            ('@task("My Task")\ndef evaluate(): pass\n', ["My Task"]),
+            # no name — falls back to function name
+            ("@task()\ndef my_eval(): pass\n", ["My Eval"]),
+            # bare decorator (no parens)
+            ("@task\ndef my_eval(): pass\n", ["My Eval"]),
+            # module-qualified: benchmarks.task
+            ('@benchmarks.task(name="Qualified")\ndef f(): pass\n', ["Qualified"]),
+            # module-qualified positional
+            ('@benchmarks.task("Qualified")\ndef f(): pass\n', ["Qualified"]),
+            # async function
+            ('@task(name="Async")\nasync def evaluate(): pass\n', ["Async"]),
+            # non-constant name expression — falls back to function name
+            ("@task(name=TASK_NAME)\ndef my_task(): pass\n", ["My Task"]),
+            # non-constant positional arg — falls back to function name
+            ("@task(TASK_NAME)\ndef my_task(): pass\n", ["My Task"]),
+            # multiple tasks in one file
+            (
+                '@task("First")\ndef a(): pass\n\n@task(name="Second")\ndef b(): pass\n',
+                ["First", "Second"],
+            ),
+            # syntax error → empty list
+            ("def broken(\n", []),
+            # no decorators at all
+            ("def plain(): pass\n", []),
+            # unrelated decorator
+            ("@other_decorator\ndef f(): pass\n", []),
+            # keyword takes priority when both name= and positional could exist
+            # (not valid Python for task(), but tests the keyword-first logic)
+            ('@task("Pos", name="Kw")\ndef f(): pass\n', ["Kw"]),
+            # file with IPython line magic
+            ('!pip install numpy\n@task("t1")\ndef f(): pass\n', ["t1"]),
+            # file with cell magic and body
+            (
+                '%%writefile out.csv\n1,2,3\n4,5,6\n\n@task("t2")\ndef g(): pass\n',
+                ["t2"],
+            ),
+            # file with Jupytext cell markers (# %%) should NOT be stripped
+            (
+                '# %%\nimport os\n\n# %%\n@task("t3")\ndef h(): pass\n',
+                ["t3"],
+            ),
+        ],
+        ids=[
+            "keyword_name",
+            "positional_name",
+            "no_name_parens",
+            "bare_decorator",
+            "module_qualified_keyword",
+            "module_qualified_positional",
+            "async_function",
+            "non_constant_keyword",
+            "non_constant_positional",
+            "multiple_tasks",
+            "syntax_error",
+            "no_decorators",
+            "unrelated_decorator",
+            "keyword_over_positional",
+            "with_line_magic",
+            "with_cell_magic",
+            "with_jupytext_markers",
+        ],
+    )
+    def test_task_name_detection(self, source, expected):
+        assert KaggleApi._get_task_names_from_file(source) == expected
+
+
+# ============================================================
+# IPython Magic Stripping
+# ============================================================
+
+
+class TestStripIpythonMagics:
+    """Tests for ``_strip_ipython_magics`` static method."""
+
+    def test_strips_line_magic(self):
+        source = "%matplotlib inline\nimport os\n"
+        result = KaggleApi._strip_ipython_magics(source)
+        assert "%matplotlib" not in result
+        assert "import os" in result
+
+    def test_strips_shell_escape(self):
+        source = "!pip install numpy\nimport numpy\n"
+        result = KaggleApi._strip_ipython_magics(source)
+        assert "!pip" not in result
+        assert "import numpy" in result
+
+    def test_strips_cell_magic_with_body(self):
+        source = "%%writefile out.csv\n1,2,3\n4,5,6\n\nimport os\n"
+        result = KaggleApi._strip_ipython_magics(source)
+        assert "%%writefile" not in result
+        assert "1,2,3" not in result
+        assert "import os" in result
+
+    def test_preserves_jupytext_cell_markers(self):
+        """``# %%`` markers are NOT magics and must be preserved."""
+        source = "# %%\nimport os\n\n# %%\nx = 1\n"
+        result = KaggleApi._strip_ipython_magics(source)
+        assert result == source
+
+    def test_preserves_line_count(self):
+        """Stripped lines are replaced with blanks to keep line numbers stable."""
+        source = "!pip install foo\nimport os\n%%writefile a.txt\nhello\n\nx = 1\n"
+        assert source.count("\n") == KaggleApi._strip_ipython_magics(source).count("\n")
+
+    def test_mixed_magics_and_code(self):
+        """A realistic Jupytext percent-format file."""
+        source = (
+            "# %%\n"
+            "!pip install kaggle_benchmarks\n"
+            "\n"
+            "# %%\n"
+            "import kaggle_benchmarks as kb\n"
+            "\n"
+            "# %%\n"
+            '@kb.task("ask")\n'
+            "def my_task(llm):\n"
+            "    pass\n"
+            "\n"
+            "my_task.run(kb.llm)\n"
+            "\n"
+            "# %%\n"
+            "%%writefile a.csv\n"
+            "1,2,3\n"
+            "4,5,6\n"
+        )
+        result = KaggleApi._strip_ipython_magics(source)
+        # Code is preserved
+        assert "import kaggle_benchmarks" in result
+        assert '@kb.task("ask")' in result
+        assert "my_task.run" in result
+        # Magics are gone
+        assert "!pip" not in result
+        assert "%%writefile" not in result
+        assert "1,2,3" not in result
+        # Line count preserved
+        assert source.count("\n") == result.count("\n")
+
+    def test_empty_source(self):
+        assert KaggleApi._strip_ipython_magics("") == ""
+
+    def test_no_magics(self):
+        source = "import os\nx = 1\n"
+        assert KaggleApi._strip_ipython_magics(source) == source
