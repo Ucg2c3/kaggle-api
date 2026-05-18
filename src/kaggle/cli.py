@@ -19,6 +19,7 @@ from __future__ import print_function
 
 import argparse
 import json
+import sys
 
 from requests.exceptions import HTTPError
 
@@ -76,15 +77,15 @@ def main() -> None:
         if e.response is not None and e.response.status_code == 401:
             print_auth_help()
         else:
-            print(e)
+            print(e, file=sys.stderr)
         out = None
         error = True
     except ApiException as e:
-        print(e)
+        print(e, file=sys.stderr)
         out = None
         error = True
     except ValueError as e:
-        print(e)
+        print(e, file=sys.stderr)
         out = None
         error = True
     except KeyboardInterrupt:
@@ -1257,7 +1258,7 @@ def parse_benchmark_tasks(subparsers) -> None:
         "push",
         formatter_class=argparse.RawTextHelpFormatter,
         help=Help.command_benchmarks_tasks_push,
-        usage="%(prog)s [-h] task -f FILE [--wait [WAIT]] [--poll-interval POLL_INTERVAL]",
+        usage="%(prog)s [-h] task -f FILE [--wait [WAIT]] [--poll-interval POLL_INTERVAL] [-v]",
     )
     parser_push_optional = parser_push._action_groups.pop()
     parser_push_required = parser_push.add_argument_group("required arguments")
@@ -1277,9 +1278,16 @@ def parse_benchmark_tasks(subparsers) -> None:
         "--poll-interval",
         dest="poll_interval",
         type=int,
-        default=10,
+        default=60,
         required=False,
         help=Help.param_benchmarks_poll_interval,
+    )
+    parser_push_optional.add_argument(
+        "-v",
+        "--verbose",
+        dest="verbose",
+        action="store_true",
+        help=Help.param_benchmarks_verbose,
     )
     parser_push._action_groups.append(parser_push_optional)
     parser_push.set_defaults(func=api.benchmarks_tasks_push_cli)
@@ -1289,7 +1297,7 @@ def parse_benchmark_tasks(subparsers) -> None:
         "run",
         formatter_class=argparse.RawTextHelpFormatter,
         help=Help.command_benchmarks_tasks_run,
-        usage="%(prog)s [-h] task [-m MODEL [MODEL ...]] [--wait [WAIT]] [--poll-interval POLL_INTERVAL]",
+        usage="%(prog)s [-h] task [-m MODEL [MODEL ...]] [--wait [WAIT]] [--poll-interval POLL_INTERVAL] [-v]",
     )
     parser_run_optional = parser_run._action_groups.pop()
     parser_run_required = parser_run.add_argument_group("required arguments")
@@ -1311,9 +1319,16 @@ def parse_benchmark_tasks(subparsers) -> None:
         "--poll-interval",
         dest="poll_interval",
         type=int,
-        default=10,
+        default=60,
         required=False,
         help=Help.param_benchmarks_poll_interval,
+    )
+    parser_run_optional.add_argument(
+        "-v",
+        "--verbose",
+        dest="verbose",
+        action="store_true",
+        help=Help.param_benchmarks_verbose,
     )
     parser_run._action_groups.append(parser_run_optional)
     parser_run.set_defaults(func=api.benchmarks_tasks_run_cli)
@@ -2039,7 +2054,10 @@ class Help(object):
         "Wait for runs to complete. Optionally specify a timeout in seconds (0 or omit value = wait indefinitely)"
     )
     param_benchmarks_output = "Directory to download output files into"
-    param_benchmarks_poll_interval = "Seconds between status polls when using --wait (default: 10)"
+    param_benchmarks_poll_interval = (
+        "Maximum seconds between status polls (default: 60). Polling starts at 5s and increases automatically"
+    )
+    param_benchmarks_verbose = "Enable verbose polling logs"
     param_benchmarks_status = "Filter tasks by creation status. " "Valid values: queued, running, completed, errored"
 
     # Files params

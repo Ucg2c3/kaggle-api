@@ -354,6 +354,74 @@ class TestPush:
         assert "Waiting for task to be processed" in output
         assert "Task 'my-task' creation completed." in output
 
+    def test_push_adaptive_polling(self, api, tmp_path):
+        filepath = _write_task_file(tmp_path)
+        _setup_create_response(api, "my-task")
+        api._mock_benchmarks.get_benchmark_task.side_effect = [
+            _make_task(state=COMPLETED),
+            _make_task(state=QUEUED),
+            _make_task(state=QUEUED),
+            _make_task(state=QUEUED),
+            _make_task(state=COMPLETED),
+        ]
+        with patch("time.sleep") as mock_sleep:
+            api.benchmarks_tasks_push_cli("my-task", filepath, wait=0, poll_interval=10)
+        assert mock_sleep.call_count == 3
+        # Starts at 5s (ADAPTIVE_POLL_START), grows by 1.5x, caps at poll_interval (10)
+        mock_sleep.assert_any_call(5)
+        mock_sleep.assert_any_call(7)
+        mock_sleep.assert_any_call(10)
+
+    def test_push_large_poll_interval_adaptive_growth(self, api, tmp_path):
+        """When poll_interval > 60s, polling still starts at 5s and grows adaptively to poll_interval."""
+        filepath = _write_task_file(tmp_path)
+        _setup_create_response(api, "my-task")
+        api._mock_benchmarks.get_benchmark_task.side_effect = [
+            _make_task(state=COMPLETED),
+            _make_task(state=QUEUED),
+            _make_task(state=QUEUED),
+            _make_task(state=QUEUED),
+            _make_task(state=COMPLETED),
+        ]
+        with patch("time.sleep") as mock_sleep:
+            api.benchmarks_tasks_push_cli("my-task", filepath, wait=0, poll_interval=90)
+        intervals = [call[0][0] for call in mock_sleep.call_args_list]
+        assert mock_sleep.call_count == 3
+        # Starts at 5s, grows by 1.5x: 5 -> 7 -> 10, all below 90 cap
+        assert intervals == [5, 7, 10]
+
+    def test_push_verbose_prints_sleep_info(self, api, capsys, tmp_path):
+        """Verbose flag causes adaptive sleep durations to be printed."""
+        filepath = _write_task_file(tmp_path)
+        _setup_create_response(api, "my-task")
+        api._mock_benchmarks.get_benchmark_task.side_effect = [
+            _make_task(state=COMPLETED),
+            _make_task(state=QUEUED),
+            _make_task(state=COMPLETED),
+        ]
+        with patch("time.sleep"):
+            api.benchmarks_tasks_push_cli("my-task", filepath, wait=0, poll_interval=10, verbose=True)
+        output = capsys.readouterr().out
+        assert "Adaptive polling sleep: 5s" in output
+
+    def test_push_adaptive_polling_caps_at_poll_interval(self, api, tmp_path):
+        """Adaptive polling does not exceed the user's poll_interval."""
+        filepath = _write_task_file(tmp_path)
+        _setup_create_response(api, "my-task")
+        # With poll_interval=10: 5 -> 7 -> 10 -> 10 -> 10 -> 10 -> 10
+        api._mock_benchmarks.get_benchmark_task.side_effect = [
+            _make_task(state=COMPLETED),  # initial check
+            *[_make_task(state=QUEUED) for _ in range(7)],
+            _make_task(state=COMPLETED),
+        ]
+        with patch("time.sleep") as mock_sleep:
+            api.benchmarks_tasks_push_cli("my-task", filepath, wait=0, poll_interval=10)
+        intervals = [call[0][0] for call in mock_sleep.call_args_list]
+        # All intervals should be <= poll_interval (10)
+        assert all(i <= 10 for i in intervals), f"Intervals exceeded poll_interval cap: {intervals}"
+        # The last few should be exactly 10 (capped)
+        assert intervals[-1] == 10
+
     def test_push_wait_times_out(self, api, capsys, tmp_path):
         filepath = _write_task_file(tmp_path)
         _setup_create_response(api, "my-task")
@@ -503,6 +571,70 @@ class TestRun:
         assert "All runs completed" in output
         assert "gemini-pro: COMPLETED" in output
 
+    def test_run_adaptive_polling(self, api):
+        _setup_completed_task(api)
+        _setup_batch_schedule(api, [_make_run_result()])
+        api._mock_benchmarks.list_benchmark_task_runs.side_effect = [
+            MagicMock(runs=[_make_run(state=RUN_RUNNING)], next_page_token=""),
+            MagicMock(runs=[_make_run(state=RUN_RUNNING)], next_page_token=""),
+            MagicMock(runs=[_make_run(state=RUN_RUNNING)], next_page_token=""),
+            MagicMock(runs=[_make_run(state=RUN_COMPLETED)], next_page_token=""),
+        ]
+        with patch("time.sleep") as mock_sleep:
+            api.benchmarks_tasks_run_cli("my-task", ["gemini-pro"], wait=0, poll_interval=10)
+        assert mock_sleep.call_count == 3
+        # Starts at 5s (ADAPTIVE_POLL_START), grows by 1.5x, caps at poll_interval (10)
+        mock_sleep.assert_any_call(5)
+        mock_sleep.assert_any_call(7)
+        mock_sleep.assert_any_call(10)
+
+    def test_run_large_poll_interval_adaptive_growth(self, api):
+        """When poll_interval > 60s, polling still starts at 5s and grows adaptively to poll_interval."""
+        _setup_completed_task(api)
+        _setup_batch_schedule(api, [_make_run_result()])
+        api._mock_benchmarks.list_benchmark_task_runs.side_effect = [
+            MagicMock(runs=[_make_run(state=RUN_RUNNING)], next_page_token=""),
+            MagicMock(runs=[_make_run(state=RUN_RUNNING)], next_page_token=""),
+            MagicMock(runs=[_make_run(state=RUN_RUNNING)], next_page_token=""),
+            MagicMock(runs=[_make_run(state=RUN_COMPLETED)], next_page_token=""),
+        ]
+        with patch("time.sleep") as mock_sleep:
+            api.benchmarks_tasks_run_cli("my-task", ["gemini-pro"], wait=0, poll_interval=90)
+        intervals = [call[0][0] for call in mock_sleep.call_args_list]
+        assert mock_sleep.call_count == 3
+        # Starts at 5s, grows by 1.5x: 5 -> 7 -> 10, all below 90 cap
+        assert intervals == [5, 7, 10]
+
+    def test_run_verbose_prints_sleep_info(self, api, capsys):
+        """Verbose flag causes adaptive sleep durations to be printed."""
+        _setup_completed_task(api)
+        _setup_batch_schedule(api, [_make_run_result()])
+        api._mock_benchmarks.list_benchmark_task_runs.side_effect = [
+            MagicMock(runs=[_make_run(state=RUN_RUNNING)], next_page_token=""),
+            MagicMock(runs=[_make_run(state=RUN_COMPLETED)], next_page_token=""),
+        ]
+        with patch("time.sleep"):
+            api.benchmarks_tasks_run_cli("my-task", ["gemini-pro"], wait=0, poll_interval=10, verbose=True)
+        output = capsys.readouterr().out
+        assert "Adaptive polling sleep: 5s" in output
+
+    def test_run_adaptive_polling_caps_at_poll_interval(self, api):
+        """Adaptive polling does not exceed the user's poll_interval."""
+        _setup_completed_task(api)
+        _setup_batch_schedule(api, [_make_run_result()])
+        # With poll_interval=10: 5 -> 7 -> 10 -> 10 -> 10 -> 10 -> 10
+        api._mock_benchmarks.list_benchmark_task_runs.side_effect = [
+            *[MagicMock(runs=[_make_run(state=RUN_RUNNING)], next_page_token="") for _ in range(7)],
+            MagicMock(runs=[_make_run(state=RUN_COMPLETED)], next_page_token=""),
+        ]
+        with patch("time.sleep") as mock_sleep:
+            api.benchmarks_tasks_run_cli("my-task", ["gemini-pro"], wait=0, poll_interval=10)
+        intervals = [call[0][0] for call in mock_sleep.call_args_list]
+        # All intervals should be <= poll_interval (10)
+        assert all(i <= 10 for i in intervals), f"Intervals exceeded poll_interval cap: {intervals}"
+        # The last few should be exactly 10 (capped)
+        assert intervals[-1] == 10
+
     def test_run_wait_times_out(self, api, capsys):
         _setup_completed_task(api)
         _setup_batch_schedule(api, [_make_run_result()])
@@ -550,6 +682,22 @@ class TestList:
         assert "Task" in output
         assert "Version" in output
         assert "my-task" in output
+
+    def test_list_retries_on_429_and_succeeds(self, api, capsys):
+        """When list receives 429, it retries and succeeds, printing retry log to stderr."""
+        api._mock_benchmarks.list_benchmark_tasks.side_effect = [
+            HTTPError(response=MagicMock(status_code=429, headers={})),
+            MagicMock(tasks=[_make_task()], next_page_token=""),
+        ]
+        with patch("time.sleep") as mock_sleep:
+            api.benchmarks_tasks_list_cli()
+        mock_sleep.assert_called_once()
+        captured = capsys.readouterr()
+        assert "Request failed:" in captured.err
+        assert "Will retry in" in captured.err
+        assert "Request failed:" not in captured.out
+        assert "Task" in captured.out
+        assert "my-task" in captured.out
 
     def test_list_with_name_regex_filter(self, api, capsys):
         _setup_list_response(api, [_make_task(slug="math-task")])

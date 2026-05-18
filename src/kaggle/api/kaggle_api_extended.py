@@ -916,6 +916,8 @@ class KaggleApi:
 
     def _calculate_backoff_delay(self, attempt, initial_delay_millis, retry_multiplier, randomness_factor):
         delay_ms = initial_delay_millis * (retry_multiplier**attempt)
+        # TODO: int() truncates (random() - 0.5) to 0 for all values in [-0.5, 0.5),
+        # making jitter always zero. Apply int() to the whole expression instead.
         random_wait_ms = int(random() - 0.5) * 2 * delay_ms * randomness_factor
         total_delay = (delay_ms + random_wait_ms) / 1000.0
         return total_delay
@@ -961,7 +963,7 @@ class KaggleApi:
                                 total_delay = self._calculate_backoff_delay(
                                     i, initial_delay_millis, retry_multiplier, randomness_factor
                                 )
-                            print("Request failed: %s. Will retry in %2.1f seconds" % (e, total_delay))
+                            print("Request failed: %s. Will retry in %2.1f seconds" % (e, total_delay), file=sys.stderr)
                             time.sleep(total_delay)
                             continue
                     raise
@@ -6755,7 +6757,7 @@ class KaggleApi:
         request = ApiGetBenchmarkTaskRequest()
         request.slug = self._make_task_slug(task)
         try:
-            return kaggle.benchmarks.benchmark_tasks_api_client.get_benchmark_task(request)
+            return self.with_retry(kaggle.benchmarks.benchmark_tasks_api_client.get_benchmark_task)(request)
         except HTTPError as e:
             if e.response.status_code in (403, 404):
                 if allow_not_found:
@@ -6776,7 +6778,7 @@ class KaggleApi:
 
         def _fetch(page_token):
             request.page_token = page_token
-            return kaggle.benchmarks.benchmark_tasks_api_client.list_benchmark_task_runs(request)
+            return self.with_retry(kaggle.benchmarks.benchmark_tasks_api_client.list_benchmark_task_runs)(request)
 
         runs = self._paginate(_fetch, lambda r: r.runs or [])
 
@@ -6804,7 +6806,7 @@ class KaggleApi:
             req = ApiListBenchmarkModelsRequest()
             if page_token:
                 req.page_token = page_token
-            return kaggle.benchmarks.benchmarks_api_client.list_benchmark_models(req)
+            return self.with_retry(kaggle.benchmarks.benchmarks_api_client.list_benchmark_models)(req)
 
         available = self._paginate(_fetch_models, lambda r: r.benchmark_models)
         if not available:
@@ -6846,10 +6848,24 @@ class KaggleApi:
                 except (ValueError, IndexError):
                     raise ValueError(f"Invalid selection: {selection}")
 
-    def _poll_task_creation(self, kaggle, task, wait, poll_interval):
+    _ADAPTIVE_POLL_START = 5  # Initial adaptive polling interval in seconds
+
+    @staticmethod
+    def _adaptive_sleep(current_interval, poll_interval, verbose=False):
+        """Sleep for the current interval and return the next adaptive interval.
+
+        The interval increases by 50% each call, capped at poll_interval.
+        """
+        if verbose:
+            print(f"  Adaptive polling sleep: {current_interval}s")
+        time.sleep(current_interval)
+        return min(poll_interval, int(current_interval * 1.5))
+
+    def _poll_task_creation(self, kaggle, task, wait, poll_interval, verbose=False):
         """Poll task creation status until terminal or timeout."""
         print("Waiting for task to be processed...")
         start_time = time.time()
+        current_interval = min(self._ADAPTIVE_POLL_START, poll_interval)
         while True:
             task_info = self._get_benchmark_task(task, kaggle)
             state = task_info.creation_state
@@ -6870,12 +6886,13 @@ class KaggleApi:
                 print(f"Timed out waiting for task creation after {wait} seconds.")
                 return
 
-            time.sleep(poll_interval)
+            current_interval = self._adaptive_sleep(current_interval, poll_interval, verbose)
 
-    def _poll_runs(self, kaggle, task, models, wait, poll_interval):
+    def _poll_runs(self, kaggle, task, models, wait, poll_interval, verbose=False):
         """Poll run status until all runs are terminal or timeout."""
         print("Waiting for run(s) to complete...")
         start_time = time.time()
+        current_interval = min(self._ADAPTIVE_POLL_START, poll_interval)
         while True:
             all_runs = self._fetch_task_runs(kaggle, task, models)
 
@@ -6901,7 +6918,7 @@ class KaggleApi:
                 print(f"Timed out waiting for runs after {wait} seconds.")
                 return
 
-            time.sleep(poll_interval)
+            current_interval = self._adaptive_sleep(current_interval, poll_interval, verbose)
 
     # -- Public CLI methods --
 
@@ -6976,7 +6993,7 @@ class KaggleApi:
         self._write_benchmarks_example(example_file)
         self._write_benchmarks_reference(os.path.dirname(os.path.abspath(example_file)))
 
-    def benchmarks_tasks_push_cli(self, task, file, wait=None, poll_interval=10):
+    def benchmarks_tasks_push_cli(self, task, file, wait=None, poll_interval=60, verbose=False):
         if poll_interval is not None and poll_interval <= 0:
             raise ValueError("--poll-interval must be a positive integer")
         if not os.path.isfile(file):
@@ -7008,14 +7025,14 @@ class KaggleApi:
                         f"Use --wait to monitor the existing creation."
                     )
                 print(f"Task '{task_slug}' is already being created. Waiting for it to finish...")
-                self._poll_task_creation(kaggle, task_slug, wait, poll_interval)
+                self._poll_task_creation(kaggle, task_slug, wait, poll_interval, verbose=verbose)
                 print(f"Pushing new version of '{task_slug}'...")
 
             request = ApiCreateBenchmarkTaskRequest()
             request.slug = task_slug
             request.text = notebook_content
 
-            response = kaggle.benchmarks.benchmark_tasks_api_client.create_benchmark_task(request)
+            response = self.with_retry(kaggle.benchmarks.benchmark_tasks_api_client.create_benchmark_task)(request)
             error = getattr(response, "error", None)
             if error:
                 raise ValueError(f"Failed to push task: {error}")
@@ -7028,9 +7045,9 @@ class KaggleApi:
             if wait is None:
                 print(f"To check creation status, use: kaggle b t status {task_slug}")
             else:
-                self._poll_task_creation(kaggle, task_slug, wait, poll_interval)
+                self._poll_task_creation(kaggle, task_slug, wait, poll_interval, verbose=verbose)
 
-    def benchmarks_tasks_run_cli(self, task, model=None, wait=None, poll_interval=10):
+    def benchmarks_tasks_run_cli(self, task, model=None, wait=None, poll_interval=60, verbose=False):
         if poll_interval is not None and poll_interval <= 0:
             raise ValueError("--poll-interval must be a positive integer")
         models = self._normalize_model_list(model)
@@ -7056,7 +7073,9 @@ class KaggleApi:
             request.model_version_slugs = models
 
             try:
-                response = kaggle.benchmarks.benchmark_tasks_api_client.batch_schedule_benchmark_task_runs(request)
+                response = self.with_retry(
+                    kaggle.benchmarks.benchmark_tasks_api_client.batch_schedule_benchmark_task_runs
+                )(request)
             except HTTPError as e:
                 if e.response.status_code == 404:
                     raise ValueError(
@@ -7074,7 +7093,7 @@ class KaggleApi:
             if wait is None:
                 print(f"To check status later, use: kaggle b t status {task}")
             else:
-                self._poll_runs(kaggle, task, models, wait, poll_interval)
+                self._poll_runs(kaggle, task, models, wait, poll_interval, verbose=verbose)
 
     def benchmarks_tasks_list_cli(self, name_regex=None, status=None):
         request = ApiListBenchmarkTasksRequest()
@@ -7087,7 +7106,7 @@ class KaggleApi:
 
             def _fetch(page_token):
                 request.page_token = page_token
-                return kaggle.benchmarks.benchmark_tasks_api_client.list_benchmark_tasks(request)
+                return self.with_retry(kaggle.benchmarks.benchmark_tasks_api_client.list_benchmark_tasks)(request)
 
             all_tasks = self._paginate(_fetch, lambda r: r.tasks or [])
             self._print_task_table(all_tasks)
@@ -7152,7 +7171,9 @@ class KaggleApi:
                     continue
 
                 print(f"Downloading output for run {r.id} ({slug})...")
-                response = kaggle.benchmarks.benchmark_tasks_api_client.download_benchmark_task_run_output(dl_request)
+                response = self.with_retry(
+                    kaggle.benchmarks.benchmark_tasks_api_client.download_benchmark_task_run_output
+                )(dl_request)
                 zipfile_path = outdir + ".zip"
                 self.download_file(response, zipfile_path, kaggle.http_client(), quiet=False)
                 # Extract the zip archive into the output directory.
@@ -7178,7 +7199,7 @@ class KaggleApi:
                 req = ApiListBenchmarkModelsRequest()
                 if page_token:
                     req.page_token = page_token
-                return kaggle.benchmarks.benchmarks_api_client.list_benchmark_models(req)
+                return self.with_retry(kaggle.benchmarks.benchmarks_api_client.list_benchmark_models)(req)
 
             models = self._paginate(_fetch_models, lambda r: r.benchmark_models)
             if not models:
