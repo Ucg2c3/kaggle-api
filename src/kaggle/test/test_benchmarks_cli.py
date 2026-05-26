@@ -495,7 +495,9 @@ class TestRun:
         api.benchmarks_tasks_run_cli("my-task", models)
         output = capsys.readouterr().out
         assert "Submitted run(s) for task 'my-task'" in output
-        assert "To check status later, use: kaggle b t status" in output
+        assert "Next steps:" in output
+        assert "Check run status:" in output
+        assert "kaggle b t status my-task" in output
         for m in models:
             assert f"{m}: Scheduled" in output
 
@@ -517,7 +519,7 @@ class TestRun:
         with patch("time.sleep"):
             api.benchmarks_tasks_run_cli("my-task", ["gemini-pro"], wait=0)
         output = capsys.readouterr().out
-        assert "To check status later" not in output
+        assert "Check run status" not in output
 
     # -- Interactive model selection --
 
@@ -531,11 +533,12 @@ class TestRun:
         request = api._mock_benchmarks.batch_schedule_benchmark_task_runs.call_args[0][0]
         assert request.model_version_slugs == ["gemini-pro"]
 
-    def test_run_selects_all_models(self, api):
+    def test_run_selects_multiple_models_by_number(self, api):
+        """Comma-separated indices pick multiple models."""
         _setup_completed_task(api)
         _setup_available_models(api, ["gemini-pro", "gemma-2b"])
         _setup_batch_schedule(api, [])
-        with patch("builtins.input", return_value="all"):
+        with patch("builtins.input", return_value="1,2"):
             api.benchmarks_tasks_run_cli("my-task")
         request = api._mock_benchmarks.batch_schedule_benchmark_task_runs.call_args[0][0]
         assert request.model_version_slugs == ["gemini-pro", "gemma-2b"]
@@ -561,6 +564,36 @@ class TestRun:
         _setup_available_models(api, ["gemini-pro"])
         with patch("builtins.input", side_effect=EOFError), pytest.raises(ValueError, match="-m/--model"):
             api.benchmarks_tasks_run_cli("my-task")
+
+    def test_run_model_selection_table_header(self, api, capsys):
+        """Interactive model picker prints summary + Model/Slug/Modality header + underline."""
+        _setup_completed_task(api)
+        _setup_available_models(api, ["gemini-pro", "gemma-2b"])
+        _setup_batch_schedule(api, [_make_run_result()])
+        with patch("builtins.input", return_value="1"):
+            api.benchmarks_tasks_run_cli("my-task")
+        output = capsys.readouterr().out
+        assert "Showing 1-2 of 2 models available" in output
+        assert "Model" in output and "Slug" in output and "Modality" in output
+        # Per-column unicode underlines
+        assert "─" * len("Model") in output
+
+    def test_run_model_selection_pagination(self, api, capsys):
+        """When >page_size models, the [Page X/Y] indicator appears and 'n' advances."""
+        _setup_completed_task(api)
+        _setup_available_models(api, [f"model-{i}" for i in range(25)])
+        _setup_batch_schedule(api, [_make_run_result()])
+        # 'n' moves to page 2, then '21' selects model index 21.
+        with patch("builtins.input", side_effect=["n", "21"]):
+            api.benchmarks_tasks_run_cli("my-task")
+        output = capsys.readouterr().out
+        assert "Showing 1-20 of 25 models available" in output
+        assert "Showing 21-25 of 25 models available" in output
+        assert "[Page 1/2]" in output
+        assert "[Page 2/2]" in output
+        # Verify the selection landed on the right (1-indexed) slug.
+        request = api._mock_benchmarks.batch_schedule_benchmark_task_runs.call_args[0][0]
+        assert request.model_version_slugs == ["model-20"]
 
     def test_run_accepts_piped_model_selection(self, api):
         """Piped stdin with a selection still schedules the chosen model."""
@@ -697,8 +730,9 @@ class TestList:
         api.benchmarks_tasks_list_cli()
         output = capsys.readouterr().out
         assert "Task" in output
-        assert "Version" in output
+        assert "Status" in output
         assert "my-task" in output
+        assert "Showing 1-1 of 1 tasks" in output
 
     def test_list_retries_on_429_and_succeeds(self, api, capsys):
         """When list receives 429, it retries and succeeds, printing retry log to stderr."""
@@ -746,19 +780,56 @@ class TestList:
 
     @pytest.mark.parametrize("tasks", [[], None], ids=["empty_list", "none"])
     def test_list_empty(self, api, capsys, tasks):
-        """Empty/None task list still prints the header."""
+        """Empty/None task list prints a friendly message instead of an empty table."""
         _setup_list_response(api, tasks)
         api.benchmarks_tasks_list_cli()
         output = capsys.readouterr().out
-        assert "Task" in output
+        assert "No tasks found." in output
         assert "my-task" not in output
 
     def test_list_table_format(self, api, capsys):
-        """Table uses 40/10/20/20 column widths and 93-char separator."""
+        """Table uses per-column unicode-line underlines spanning each column's full width."""
         _setup_list_response(api, [_make_task()])
         api.benchmarks_tasks_list_cli()
         output = capsys.readouterr().out
-        assert "-" * 93 in output
+        # Column widths: max_task_len(>=40)/20/20.
+        assert "─" * 40 in output  # Task column (min width 40)
+        assert "─" * 20 in output  # Status / Created columns
+
+    def test_list_pagination_prompts_for_navigation(self, api, capsys):
+        """When >page_size tasks, an interactive [n/p/q] prompt drives paging."""
+        tasks = [_make_task(slug=f"task-{i}") for i in range(25)]
+        _setup_list_response(api, tasks)
+        # 'n' advances to page 2, then 'q' exits.
+        with patch("builtins.input", side_effect=["n", "q"]):
+            api.benchmarks_tasks_list_cli()
+        output = capsys.readouterr().out
+        assert "Showing 1-20 of 25 tasks" in output
+        assert "Showing 21-25 of 25 tasks" in output
+        assert "[Page 1/2]" in output
+        assert "[Page 2/2]" in output
+
+    def test_list_page_size_overrides_default(self, api, capsys):
+        """``--page-size 5`` overrides the default page size."""
+        tasks = [_make_task(slug=f"task-{i}") for i in range(12)]
+        _setup_list_response(api, tasks)
+        with patch("builtins.input", side_effect=["q"]):
+            api.benchmarks_tasks_list_cli(page_size=5)
+        output = capsys.readouterr().out
+        assert "Showing 1-5 of 12 tasks" in output
+        assert "[Page 1/3]" in output
+
+    def test_list_all_skips_interactive_pager(self, api, capsys):
+        """``--all`` prints every task and never prompts for input."""
+        tasks = [_make_task(slug=f"task-{i}") for i in range(25)]
+        _setup_list_response(api, tasks)
+        # No input mock — would raise if input() were called.
+        api.benchmarks_tasks_list_cli(show_all=True)
+        output = capsys.readouterr().out
+        assert "Showing 1-25 of 25 tasks" in output
+        assert "[Page" not in output
+        assert "task-0" in output
+        assert "task-24" in output
 
 
 # ============================================================
@@ -777,7 +848,7 @@ class TestStatus:
         output = capsys.readouterr().out
         assert "Task:" in output
         assert "Version:" in output
-        assert "Status:   COMPLETED" in output
+        assert "Status:   Completed" in output
         assert "Created:" in output
         assert "Task URL:" in output
 
@@ -831,6 +902,35 @@ class TestStatus:
         assert "[gemma-2b]" in output
         assert "OOM" in output
 
+    def test_status_errored_run_truncates_traceback(self, api, capsys):
+        """Multi-line tracebacks collapse to the last meaningful line only."""
+        traceback_msg = (
+            "Traceback (most recent call last):\n"
+            '  File "/benchmarks/src/tasks.py", line 127, in run\n'
+            "    run.result = self.func(*args, **kwargs)\n"
+            '  File "/tmp/ipykernel/162297423.py", line 6, in what_is_kaggle\n'
+            '    response = llm.prompt("What is Kaggle?")\n'
+            '  File "/openai/_base_client.py", line 1047, in request\n'
+            "    raise self._make_status_error_from_response(err.response) from None\n"
+            "openai.BadRequestError: Error code: 400 - max_tokens too large\n"
+        )
+        api._mock_benchmarks.get_benchmark_task.return_value = _make_task()
+        _setup_runs_response(
+            api,
+            [_make_run(model="gemma-2b", state=RUN_ERRORED, run_id=43, error_message=traceback_msg)],
+        )
+        api.benchmarks_tasks_status_cli("my-task")
+        output = capsys.readouterr().out
+        # Final exception line is rendered...
+        assert "openai.BadRequestError: Error code: 400 - max_tokens too large" in output
+        # ...stack-frame noise is suppressed
+        assert "Traceback (most recent call last)" not in output
+        assert "ipykernel" not in output
+        assert "/openai/_base_client.py" not in output
+        # Slug and exception sit on the same line — no newline between bracket and message
+        assert "[gemma-2b]" in output
+        assert "[gemma-2b]\n" not in output
+
     def test_status_pagination(self, api, capsys):
         """Status fetches all pages of runs."""
         api._mock_benchmarks.get_benchmark_task.return_value = _make_task()
@@ -875,8 +975,9 @@ class TestDownload:
         with patch("zipfile.ZipFile"), patch("os.remove"):
             api.benchmarks_tasks_download_cli("my-task", output="my_output_dir")
         output = capsys.readouterr().out
-        assert "Downloading output for run" in output
-        assert "Downloaded output for gemini-pro to" in output
+        assert "Downloading output runs for my-task" in output
+        assert "gemini-pro" in output
+        assert "Done" in output
         assert "my_output_dir" in output
 
     def test_download_default_output_path(self, api, capsys):
@@ -956,8 +1057,8 @@ class TestDownload:
         api.benchmarks_tasks_download_cli("my-task", output=outdir)
 
         output = capsys.readouterr().out
-        assert "Skipping gemini-pro (run 42)" in output
-        assert "already downloaded" in output
+        assert "gemini-pro" in output
+        assert "Skipped" in output
         # No download API call should have been made
         api._mock_benchmarks.download_benchmark_task_run_output.assert_not_called()
 
@@ -1070,15 +1171,15 @@ class TestDownload:
         api.benchmarks_tasks_download_cli("my-task", output=outdir)
 
         output = capsys.readouterr().out
-        # Bad zip: warning printed, raw file kept
-        assert "not a valid zip archive" in output
+        # Bad zip: status row marks it failed, raw file kept
+        assert "Bad zip" in output
         bad_zip_path = os.path.join(outdir, "my-task", "1", "bad-model", "10.zip")
         assert os.path.isfile(bad_zip_path)
         # Good zip: extracted successfully
         good_dir = os.path.join(outdir, "my-task", "1", "good-model", "11")
         assert os.path.isdir(good_dir)
         assert os.path.isfile(os.path.join(good_dir, "result.txt"))
-        assert "Downloaded output for good-model to" in output
+        assert "Done" in output
 
     def test_download_version_zero_uses_zero(self, api, capsys):
         """When version_number is 0 (unset), directory uses 'unset'."""
@@ -1713,3 +1814,71 @@ class TestStripIpythonMagics:
     def test_no_magics(self):
         source = "import os\nx = 1\n"
         assert KaggleApi._strip_ipython_magics(source) == source
+
+
+# ============================================================
+# _truncate / _format_modalities helpers
+# ============================================================
+
+
+class TestTruncate:
+    """Tests for ``KaggleApi._truncate``."""
+
+    @pytest.mark.parametrize(
+        "value, max_len, expected",
+        [
+            ("hello", 10, "hello"),  # short string passes through
+            ("hello", 5, "hello"),  # exactly max length
+            ("hello world", 5, "hell…"),  # truncated to max_len - 1 + ellipsis
+            ("", 5, ""),  # empty string
+            ("a" * 100, 3, "aa…"),  # very long input
+        ],
+    )
+    def test_truncate(self, value, max_len, expected):
+        assert KaggleApi._truncate(value, max_len) == expected
+
+
+class TestFormatModalities:
+    """Tests for ``KaggleApi._format_modalities``."""
+
+    def _make_version(self, inputs=None, outputs=None):
+        version = MagicMock()
+        version.input_modalities = [MagicMock(name=f"MODALITY_{n}") for n in (inputs or [])]
+        for mock_obj, name in zip(version.input_modalities, inputs or []):
+            mock_obj.name = f"MODALITY_{name}"
+        version.output_modalities = [MagicMock() for _ in (outputs or [])]
+        for mock_obj, name in zip(version.output_modalities, outputs or []):
+            mock_obj.name = f"MODALITY_{name}"
+        return version
+
+    def test_text_to_text(self):
+        v = self._make_version(inputs=["TEXT"], outputs=["TEXT"])
+        assert KaggleApi._format_modalities(v) == "Text-to-Text"
+
+    def test_image_text_to_text_sorted_alphabetically(self):
+        v = self._make_version(inputs=["TEXT", "IMAGE"], outputs=["TEXT"])
+        assert KaggleApi._format_modalities(v) == "Image-Text-to-Text"
+
+    def test_any_to_any_when_both_have_three_or_more_matching(self):
+        v = self._make_version(
+            inputs=["TEXT", "IMAGE", "AUDIO", "VIDEO"],
+            outputs=["TEXT", "IMAGE", "AUDIO", "VIDEO"],
+        )
+        assert KaggleApi._format_modalities(v) == "Any-to-Any"
+
+    def test_unspecified_modality_skipped(self):
+        v = self._make_version(inputs=["TEXT", "UNSPECIFIED"], outputs=["TEXT"])
+        assert KaggleApi._format_modalities(v) == "Text-to-Text"
+
+    def test_missing_attributes_returns_empty(self):
+        v = MagicMock(spec=[])  # spec=[] -> no attributes -> getattr returns None
+        assert KaggleApi._format_modalities(v) == ""
+
+    def test_non_iterable_modalities_tolerated(self):
+        """Older API responses or test mocks may not have iterable modality lists."""
+        v = MagicMock()
+        v.input_modalities = MagicMock()  # truthy but not iterable as a list of enums
+        v.input_modalities.__iter__ = MagicMock(side_effect=TypeError)
+        v.output_modalities = MagicMock()
+        v.output_modalities.__iter__ = MagicMock(side_effect=TypeError)
+        assert KaggleApi._format_modalities(v) == ""

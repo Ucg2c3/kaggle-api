@@ -6663,6 +6663,11 @@ class KaggleApi:
         return s
 
     @staticmethod
+    def _format_state(state) -> str:
+        """Render an enum state in Titlecase (e.g. ``Completed``)."""
+        return KaggleApi._clean_enum_str(state).title()
+
+    @staticmethod
     def _format_time(t) -> str:
         """Format a timestamp to seconds precision for display."""
         if isinstance(t, datetime):
@@ -6675,13 +6680,12 @@ class KaggleApi:
         max_task_len = max((len(t.slug.task_slug) for t in tasks), default=40)
         max_task_len = max(max_task_len, 40)
 
-        print(f"{'Task':<{max_task_len}} {'Version':<10} {'Status':<20} {'Created':<20}")
-        print("-" * (max_task_len + 53))
+        print(f"{'Task':<{max_task_len}} {'Status':<20} {'Created':<20}")
+        print(f"{'─' * max_task_len} {'─' * 20} {'─' * 20}")
         for t in tasks:
-            version = str(t.slug.version_number) if t.slug.version_number else "unset"
             print(
-                f"{t.slug.task_slug:<{max_task_len}} {version:<10}"
-                f" {KaggleApi._clean_enum_str(t.creation_state):<20} {KaggleApi._format_time(t.create_time):<20}"
+                f"{t.slug.task_slug:<{max_task_len}}"
+                f" {KaggleApi._clean_enum_str(t.creation_state).title():<20} {KaggleApi._format_time(t.create_time):<20}"
             )
 
     @staticmethod
@@ -6689,15 +6693,14 @@ class KaggleApi:
         """Print a list of benchmark task runs in an aligned table."""
         model_col = max((len(KaggleApi._normalize_model_slug(r.model_version_slug)) for r in runs), default=20)
         model_col = max(model_col, 20)
-        time_col = 21
-        sep = model_col + 15 + time_col + time_col
+        time_col = 19  # exact width of "%Y-%m-%d %H:%M:%S"
         print(f"{'Model':<{model_col}} {'Status':<15} {'Started':<{time_col}} {'Ended':<{time_col}}")
-        print("-" * sep)
+        print(f"{'─' * model_col} {'─' * 15} {'─' * time_col} {'─' * time_col}")
         errors = []
         for r in runs:
             slug = KaggleApi._normalize_model_slug(r.model_version_slug)
             print(
-                f"{slug:<{model_col}} {KaggleApi._clean_enum_str(r.state):<15} "
+                f"{slug:<{model_col}} {KaggleApi._clean_enum_str(r.state).title():<15} "
                 f"{KaggleApi._format_time(r.start_time):<{time_col}} {KaggleApi._format_time(r.end_time):<{time_col}}"
             )
             if r.state == BenchmarkTaskRunState.BENCHMARK_TASK_RUN_STATE_ERRORED and r.error_message:
@@ -6707,9 +6710,10 @@ class KaggleApi:
             print()
             print(f"\033[1;31mErrors:\033[0m")
             for slug, msg in errors:
-                print(f"\033[1;31m  [{slug}]\033[0m")
-                for line in msg.strip().splitlines():
-                    print(f"\033[31m    {line}\033[0m")
+                # Server-captured error_message may include a full Python traceback. The actual
+                # exception line is last; everything above is stack noise. Show just that line.
+                last_line = next((ln for ln in reversed(msg.strip().splitlines()) if ln.strip()), msg.strip())
+                print(f"\033[1;31m  [{slug}]\033[0m \033[31m{last_line.strip()}\033[0m")
 
     @staticmethod
     def _strip_ipython_magics(source: str) -> str:
@@ -6885,22 +6889,36 @@ class KaggleApi:
         total = len(available)
         total_pages = math.ceil(total / page_size)
         current_page = 0
+        num_width = len(str(total))
 
-        print(f"No model specified. {total} model(s) available:")
+        modality_max = 20
+        modalities = [
+            self._truncate(self._format_modalities(getattr(m, "version", None)), modality_max) for m in available
+        ]
+        labels = [f"{i + 1:>{num_width}}. {m.display_name}" for i, m in enumerate(available)]
+        slugs = [m.version.slug for m in available]
+        model_col = max(len("Model"), max(len(label) for label in labels))
+        slug_col = max(len("Slug"), max((len(s) for s in slugs), default=4))
+        modality_col = max(len("Modality"), max((len(m) for m in modalities), default=8))
+
         while True:
             start = current_page * page_size
-            for i, m in enumerate(available[start : start + page_size], start=start + 1):
-                print(f"  {i}. {m.version.slug} ({m.display_name})")
+            end = min(start + page_size, total)
+            print(f"\nShowing {start + 1}-{end} of {total} models available:\n")
+            print(f"{'Model':<{model_col}} {'Slug':<{slug_col}} {'Modality':<{modality_col}}")
+            print(f"{'─' * model_col} {'─' * slug_col} {'─' * modality_col}")
+            for i in range(start, end):
+                print(f"{labels[i]:<{model_col}} {slugs[i]:<{slug_col}} {modalities[i]:<{modality_col}}")
 
             nav_hints = []
             if total_pages > 1:
-                print(f"  [Page {current_page + 1}/{total_pages}]")
+                print(f"[Page {current_page + 1}/{total_pages}]")
                 if current_page < total_pages - 1:
-                    nav_hints.append("'n'=next")
+                    nav_hints.append("'n'= next")
                 if current_page > 0:
-                    nav_hints.append("'p'=prev")
+                    nav_hints.append("'p'= prev")
 
-            prompt_parts = ["Enter model numbers (comma-separated)", "'all'"]
+            prompt_parts = ["\nEnter model numbers (comma-separated)"]
             if nav_hints:
                 prompt_parts.extend(nav_hints)
             try:
@@ -6916,14 +6934,40 @@ class KaggleApi:
                 current_page += 1
             elif selection == "p" and current_page > 0:
                 current_page -= 1
-            elif selection == "all":
-                return [m.version.slug for m in available]
             else:
                 try:
                     indices = [int(s) for s in selection.split(",")]
                     return [available[i - 1].version.slug for i in indices]
                 except (ValueError, IndexError):
                     raise ValueError(f"Invalid selection: {selection}")
+
+    @staticmethod
+    def _truncate(s: str, max_len: int) -> str:
+        """Truncate *s* to *max_len* characters, appending an ellipsis when shortened."""
+        return s if len(s) <= max_len else s[: max_len - 1] + "…"
+
+    @staticmethod
+    def _format_modalities(version) -> str:
+        """Render a model version's modalities as ``Input-to-Output`` (e.g., ``Image-Text-to-Text``)."""
+
+        def names(mods):
+            try:
+                out = []
+                for m in mods or []:
+                    name = getattr(m, "name", "")
+                    if name and "UNSPECIFIED" not in name:
+                        out.append(name.replace("MODALITY_", "").title())
+                return sorted(set(out))
+            except TypeError:
+                return []
+
+        in_names = names(getattr(version, "input_modalities", None))
+        out_names = names(getattr(version, "output_modalities", None))
+        if not in_names and not out_names:
+            return ""
+        if in_names == out_names and len(in_names) >= 3:
+            return "Any-to-Any"
+        return f"{'-'.join(in_names) or 'Unknown'}-to-{'-'.join(out_names) or 'Unknown'}"
 
     _ADAPTIVE_POLL_START = 5  # Initial adaptive polling interval in seconds
 
@@ -7085,7 +7129,7 @@ class KaggleApi:
         task_slug = slugify(task)
         if task_slug != task:
             print(
-                f"\n\033[1;33m⚠ Warning: task name '{task}' was normalized to slug '{task_slug}'.\033[0m\n"
+                f"\n\033[1;33mWarning: task name '{task}' was normalized to slug '{task_slug}'.\033[0m\n"
                 f"\033[33m  Use '{task_slug}' in future commands.\033[0m\n",
                 file=sys.stderr,
             )
@@ -7117,10 +7161,10 @@ class KaggleApi:
             url = self._full_task_url(response.url)
             print(f"Task '{task_slug}' pushed.")
             print(f"\033[1mTask URL: {url}\033[0m")
-            print(f"To run this task against models, use: kaggle b t run {task_slug}")
+            print(f"To run this task against models, use: $ kaggle b t run {task_slug}")
 
             if wait is None:
-                print(f"To check creation status, use: kaggle b t status {task_slug}")
+                print(f"To check creation status, use: $ kaggle b t status {task_slug}")
             else:
                 self._poll_task_creation(kaggle, task_slug, wait, poll_interval, verbose=verbose)
 
@@ -7168,11 +7212,13 @@ class KaggleApi:
                     print(f"  {model_slug}: Skipped ({res.run_skipped_reason})")
 
             if wait is None:
-                print(f"To check status later, use: kaggle b t status {task}")
+                print("\nNext steps:")
+                print("   Check run status:")
+                print(f"   $ kaggle b t status {task}")
             else:
                 self._poll_runs(kaggle, task, models, wait, poll_interval, verbose=verbose)
 
-    def benchmarks_tasks_list_cli(self, name_regex=None, status=None):
+    def benchmarks_tasks_list_cli(self, name_regex=None, status=None, page_size=None, show_all=False):
         request = ApiListBenchmarkTasksRequest()
         if name_regex:
             request.regex_filter = name_regex
@@ -7186,7 +7232,49 @@ class KaggleApi:
                 return self.with_retry(kaggle.benchmarks.benchmark_tasks_api_client.list_benchmark_tasks)(request)
 
             all_tasks = self._paginate(_fetch, lambda r: r.tasks or [])
-            self._print_task_table(all_tasks)
+            if show_all:
+                self._paginated_task_display(all_tasks, page_size=max(len(all_tasks), 1), interactive=False)
+            else:
+                self._paginated_task_display(all_tasks, page_size=page_size or 20)
+
+    def _paginated_task_display(self, tasks, page_size=20, interactive=True):
+        """Display *tasks* one page at a time with an interactive n/p/q prompt."""
+        total = len(tasks)
+        if total == 0:
+            print("No tasks found.")
+            return
+
+        # Extract owner username from a task URL of the form /benchmarks/tasks/{user}/{slug}/{ver}.
+        username = None
+        for t in tasks:
+            parts = (getattr(t, "url", "") or "").strip("/").split("/")
+            if len(parts) >= 3 and parts[0] == "benchmarks" and parts[1] == "tasks":
+                username = parts[2]
+                break
+
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        page = 1
+        while True:
+            start = (page - 1) * page_size
+            end = min(start + page_size, total)
+            url_hint = f" (https://www.kaggle.com/benchmarks/tasks/{username}/)" if username else ""
+            print(f"\nShowing {start + 1}-{end} of {total} tasks{url_hint}\n")
+            self._print_task_table(tasks[start:end])
+
+            if total_pages == 1 or not interactive:
+                return
+
+            print(f"\n[Page {page}/{total_pages}] [n]ext, [p]rev, [q]uit: ", end="", flush=True)
+            try:
+                choice = input().strip().lower()
+            except EOFError:
+                return
+            if choice == "q":
+                return
+            if choice == "n" and page < total_pages:
+                page += 1
+            elif choice == "p" and page > 1:
+                page -= 1
 
     def benchmarks_tasks_status_cli(self, task, model=None):
         task = slugify(task)
@@ -7195,11 +7283,11 @@ class KaggleApi:
             print(f"Task:     {task_info.slug.task_slug}")
             version = task_info.slug.version_number or "unset"
             print(f"Version:  {version}")
-            print(f"Status:   {self._clean_enum_str(task_info.creation_state)}")
+            print(f"Status:   {self._format_state(task_info.creation_state)}")
             print(f"Created:  {self._format_time(task_info.create_time)}")
             url = getattr(task_info, "url", None)
             if url:
-                print(f"\033[1mTask URL: {self._full_task_url(url)}\033[0m")
+                print(f"Task URL: {self._full_task_url(url)}\n")
 
             runs = self._fetch_task_runs(kaggle, task, model)
 
@@ -7236,23 +7324,42 @@ class KaggleApi:
                 print(f"Use 'kaggle b t status {task}' to check progress.")
                 return
 
-            for r in downloadable:
-                dl_request = ApiDownloadBenchmarkTaskRunOutputRequest()
-                dl_request.run_id = r.id
+            target_dir = os.path.join(output, task)
+            print(f"Downloading output runs for {task}")
+            print(f"Target directory:  {target_dir}/\n")
+
+            display_files = [
+                f"{self._normalize_model_slug(r.model_version_slug)}/{r.id}/{r.id}.zip" for r in downloadable
+            ]
+            model_col = max((len(self._normalize_model_slug(r.model_version_slug)) for r in downloadable), default=20)
+            model_col = max(model_col, 20)
+            file_col = max((len(f) for f in display_files), default=40)
+            file_col = max(file_col, 40)
+            size_col = 10
+            prog_col = 10
+
+            print(f"{'Model':<{model_col}} {'File':<{file_col}} {'Size':<{size_col}} {'Progress':<{prog_col}}")
+            print(f"{'─' * model_col} {'─' * file_col} {'─' * size_col} {'─' * prog_col}")
+
+            for r, display_file in zip(downloadable, display_files):
                 slug = self._normalize_model_slug(r.model_version_slug)
                 # Hierarchical layout: {output}/{task}/{version}/{model}/{run_id}/
                 outdir = os.path.join(output, task, version, slug, str(r.id))
+                row_prefix = f"{slug:<{model_col}} {display_file:<{file_col}}"
 
                 if os.path.isdir(outdir):
-                    print(f"Skipping {slug} (run {r.id}) — already downloaded to {outdir}")
+                    size_str = self._format_size(self._dir_size(outdir))
+                    print(f"{row_prefix} {size_str:<{size_col}} {'Skipped':<{prog_col}}")
                     continue
 
-                print(f"Downloading output for run {r.id} ({slug})...")
+                dl_request = ApiDownloadBenchmarkTaskRunOutputRequest()
+                dl_request.run_id = r.id
                 response = self.with_retry(
                     kaggle.benchmarks.benchmark_tasks_api_client.download_benchmark_task_run_output
                 )(dl_request)
                 zipfile_path = outdir + ".zip"
-                self.download_file(response, zipfile_path, kaggle.http_client(), quiet=False)
+                self.download_file(response, zipfile_path, kaggle.http_client(), quiet=True)
+                size_str = self._format_size(os.path.getsize(zipfile_path)) if os.path.exists(zipfile_path) else ""
                 # Extract the zip archive into the output directory.
                 # Note: extractall() is safe here because the zip originates from
                 # the trusted Kaggle server, not user-supplied input (zip-slip).
@@ -7260,13 +7367,32 @@ class KaggleApi:
                     with zipfile.ZipFile(zipfile_path, "r") as zf:
                         zf.extractall(outdir)
                 except zipfile.BadZipFile:
-                    print(
-                        f"Warning: Downloaded file for {slug} (run {r.id}) is not a valid zip archive. "
-                        f"The raw file has been kept at {zipfile_path}."
-                    )
+                    print(f"{row_prefix} {size_str:<{size_col}} {'Bad zip':<{prog_col}}")
                     continue
                 os.remove(zipfile_path)
-                print(f"Downloaded output for {slug} to {outdir}")
+                print(f"{row_prefix} {size_str:<{size_col}} {'Done':<{prog_col}}")
+
+    @staticmethod
+    def _format_size(n) -> str:
+        """Render a byte count as ``1.06KB`` / ``2.34MB`` / etc."""
+        if n is None:
+            return ""
+        n = float(n)
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if n < 1024 or unit == "TB":
+                return f"{n:.2f}{unit}" if unit != "B" else f"{int(n)}B"
+            n /= 1024
+        return f"{n:.2f}PB"
+
+    @staticmethod
+    def _dir_size(path) -> int:
+        total = 0
+        for dirpath, _, filenames in os.walk(path):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                if os.path.isfile(fp):
+                    total += os.path.getsize(fp)
+        return total
 
     def benchmarks_tasks_models_cli(self):
         """List all available benchmark models."""
