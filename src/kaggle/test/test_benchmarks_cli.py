@@ -242,6 +242,7 @@ class TestPush:
     def test_push_creates_task(self, api, tmp_path, capsys, content, task_name, expected_slug):
         """Push converts .py -> ipynb via jupytext and creates the task."""
         filepath = _write_task_file(tmp_path, content)
+        api._mock_benchmarks.get_benchmark_task.side_effect = HTTPError(response=MagicMock(status_code=404))
         _setup_create_response(api, task_name)
 
         jt = _push(api, task_name, filepath)
@@ -255,8 +256,9 @@ class TestPush:
 
         captured = capsys.readouterr()
         output = captured.out
-        assert f"Task '{expected_slug}' pushed." in output
-        assert "Task URL:" in output
+        assert f"Pushed {expected_slug}" in output
+        assert "Task Details:" in output
+        assert "Model Output:" in output
         assert f"kaggle b t run {expected_slug}" in output
         # When the original name differs from the slug, a normalization warning is printed to stderr.
         if task_name != expected_slug:
@@ -269,7 +271,7 @@ class TestPush:
         api._mock_benchmarks.get_benchmark_task.side_effect = HTTPError(response=MagicMock(status_code=status_code))
         _setup_create_response(api)
         _push(api, "my-task", filepath)
-        assert "Task 'my-task' pushed." in capsys.readouterr().out
+        assert "Pushed my-task" in capsys.readouterr().out
 
     def test_push_prefixes_relative_url(self, api, tmp_path, capsys):
         """If url starts with '/', prefix https://www.kaggle.com."""
@@ -313,8 +315,7 @@ class TestPush:
 
         output = capsys.readouterr().out
         assert "already being created" in output
-        assert "Pushing new version of 'my-task'" in output
-        assert "Task 'my-task' pushed." in output
+        assert "Pushed new version of my-task" in output
         # Verify the create API was still called (new version pushed)
         api._mock_benchmarks.create_benchmark_task.assert_called_once()
 
@@ -351,8 +352,9 @@ class TestPush:
             api.benchmarks_tasks_push_cli("my-task", filepath, wait=0)
 
         output = capsys.readouterr().out
-        assert "Waiting for task to be processed" in output
-        assert "Task 'my-task' creation completed." in output
+        assert "Status" in output
+        assert "Completed" in output
+        assert "Model Output:" in output
 
     def test_push_adaptive_polling(self, api, tmp_path):
         filepath = _write_task_file(tmp_path)
@@ -1528,7 +1530,7 @@ class TestBenchmarksAuth:
         assert "MODEL_PROXY_API_KEY=kaggle-benchmarks:cool-token\n" in content
         assert "MODEL_PROXY_EXPIRY_TIME=2026-04-17T12:00:00Z\n" in content
         out = capsys.readouterr().out
-        assert "MODEL_PROXY_API_KEY=****************oken" in out
+        assert "API Key  (ends in ...oken)" in out
         assert "kaggle-benchmarks:cool-token" not in out
         assert "have been written to" in out
 
@@ -1538,7 +1540,7 @@ class TestBenchmarksAuth:
             api.benchmarks_auth_cli(no_confirm=False, env_file=env_file)
         assert not (tmp_path / ".env").exists()
         out = capsys.readouterr().out
-        assert "MODEL_PROXY_URL" in out
+        assert "The following configuration will be set:" in out
         assert "have been written to" not in out
 
     def test_confirmed_on_yes(self, api, mock_token, capsys, tmp_path):
@@ -1588,9 +1590,9 @@ class TestBenchmarksInit:
             in content
         )
         out = capsys.readouterr().out
-        assert "MODEL_PROXY_API_KEY=****************oken" in out
-        assert "LLM_DEFAULT=google/gemini-3-flash-preview" in out
-        assert "have been written to" in out
+        assert "API Key  (ends in ...oken)" in out
+        assert "Default LLM      google/gemini-3-flash-preview" in out
+        assert "Environment initialized!" in out
 
     def test_writes_example_file(self, api, mock_token, capsys, tmp_path):
         env_file = str(tmp_path / ".env")
@@ -1600,7 +1602,8 @@ class TestBenchmarksInit:
         assert "import kaggle_benchmarks as kbench" in content
         assert "kaggle_benchmarks_reference.md" in content
         out = capsys.readouterr().out
-        assert "Example benchmark task file has been written to" in out
+        assert "example_task.py" in out
+        assert "Starter template" in out
 
     def test_writes_reference_file(self, api, mock_token, capsys, tmp_path):
         env_file = str(tmp_path / ".env")
@@ -1611,8 +1614,8 @@ class TestBenchmarksInit:
         content = ref_file.read_text()
         assert "kaggle-benchmarks Task Syntax Reference" in content
         out = capsys.readouterr().out
-        assert "Syntax reference has been written to" in out
         assert "kaggle_benchmarks_reference.md" in out
+        assert "Syntax guide" in out
 
     def test_skips_reference_file_if_exists(self, api, mock_token, capsys, tmp_path):
         ref_file = tmp_path / "kaggle_benchmarks_reference.md"
@@ -1622,7 +1625,7 @@ class TestBenchmarksInit:
         api.benchmarks_init_cli(no_confirm=True, env_file=env_file, example_file=str(example_file))
         assert ref_file.read_text() == "existing content\n"
         out = capsys.readouterr().out
-        assert "Reference file already exists" in out
+        assert "Environment initialized!" in out
 
     def test_skips_example_file_if_exists(self, api, mock_token, capsys, tmp_path):
         example_file = tmp_path / "example_task.py"
@@ -1631,7 +1634,7 @@ class TestBenchmarksInit:
         api.benchmarks_init_cli(no_confirm=True, env_file=env_file, example_file=str(example_file))
         assert example_file.read_text() == "existing content\n"
         out = capsys.readouterr().out
-        assert "already exists" in out
+        assert "Environment initialized!" in out
 
     def test_custom_example_file(self, api, mock_token, capsys, tmp_path):
         env_file = str(tmp_path / ".env")
@@ -1655,6 +1658,50 @@ class TestBenchmarksInit:
         content = env_file.read_text()
         assert content.startswith("EXISTING_VAR=hello\n")
         assert "LLM_DEFAULT=google/gemini-3-flash-preview\n" in content
+
+
+# ============================================================
+# Expiry Formatting
+# ============================================================
+
+
+class TestFormatExpiry:
+    """Tests for ``KaggleApi._format_expiry`` static helper."""
+
+    _NOW = "2026-05-23T12:00:00"  # frozen "now" in UTC
+
+    @pytest.fixture(autouse=True)
+    def _freeze_now(self):
+        from datetime import datetime as real_datetime, timezone
+
+        frozen = real_datetime.fromisoformat(self._NOW).replace(tzinfo=timezone.utc)
+
+        class FrozenDatetime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return frozen if tz is None else frozen.astimezone(tz)
+
+        with patch("kaggle.api.kaggle_api_extended.datetime", FrozenDatetime):
+            yield
+
+    @pytest.mark.parametrize(
+        "expiry_iso, expected",
+        [
+            ("2026-05-23T11:00:00Z", "Expired"),
+            ("2026-05-23T12:00:00Z", "Expired"),
+            ("2026-05-23T12:00:30Z", "In 1 minute"),
+            ("2026-05-23T12:05:00Z", "In 5 minutes"),
+            ("2026-05-23T13:00:00Z", "In 1 hour"),
+            ("2026-05-24T00:00:00Z", "In 12 hours"),
+            ("2026-05-24T12:00:00Z", "In 1 day"),
+            ("2026-05-30T12:00:00Z", "In 7 days"),
+        ],
+    )
+    def test_relative_buckets(self, expiry_iso, expected):
+        assert KaggleApi._format_expiry(expiry_iso) == expected
+
+    def test_unparseable_falls_back_to_raw(self):
+        assert KaggleApi._format_expiry("not-a-timestamp") == "not-a-timestamp"
 
 
 # ============================================================
