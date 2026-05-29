@@ -40,6 +40,7 @@ from os.path import expanduser
 from random import random
 
 import bleach
+import dotenv
 import mimetypes
 import requests
 import urllib3.exceptions as urllib3_exceptions
@@ -7193,10 +7194,10 @@ class KaggleApi:
             if not self.confirmation(f"write these settings to {os.path.basename(env_file_abs)}", default_to_yes=True):
                 return False
 
-        with open(env_file_abs, "a") as f:
-            f.write("\n")
-            for key, value in env_vars.items():
-                f.write(f"{key}={value}\n")
+        # Upsert in place rather than append so reruns don't stack duplicates
+        # in the user's .env and don't silently shadow any hand-edited values.
+        for key, value in env_vars.items():
+            dotenv.set_key(env_file_abs, key, value, quote_mode="never")
 
         if not quiet:
             print(f"Environment variables have been written to {env_file_abs}.")

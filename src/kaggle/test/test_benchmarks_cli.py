@@ -2112,6 +2112,90 @@ class TestBenchmarksInit:
 
 
 # ============================================================
+# Upsert behavior (auth/init reruns)
+# ============================================================
+
+
+class TestBenchmarksUpsert:
+    """End-to-end checks that ``kaggle benchmarks auth/init`` upserts the
+    managed keys rather than appending duplicates. The line-by-line upsert
+    semantics are owned by ``python-dotenv``; these tests only verify wiring
+    and the user-facing contract."""
+
+    def test_rerun_with_new_token_replaces_stale_value(self, api, tmp_path):
+        # First run: original token.
+        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
+            _make_token_response(token="kaggle-benchmarks:first")
+        )
+        env_file = tmp_path / ".env"
+        api.benchmarks_auth_cli(no_confirm=True, env_file=str(env_file))
+
+        # Second run: refreshed token.
+        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
+            _make_token_response(token="kaggle-benchmarks:second")
+        )
+        api.benchmarks_auth_cli(no_confirm=True, env_file=str(env_file))
+
+        content = env_file.read_text()
+        assert "MODEL_PROXY_API_KEY=kaggle-benchmarks:second\n" in content
+        assert "kaggle-benchmarks:first" not in content
+        assert content.count("MODEL_PROXY_API_KEY=") == 1
+
+    def test_preserves_user_added_keys_and_comments(self, api, mock_token, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text("# my notes\nMY_SECRET=hunter2\nMODEL_PROXY_URL=https://stale.example.com\n")
+        api.benchmarks_auth_cli(no_confirm=True, env_file=str(env_file))
+        content = env_file.read_text()
+        assert "# my notes\n" in content
+        assert "MY_SECRET=hunter2\n" in content
+        assert "stale.example.com" not in content
+        assert content.count("MODEL_PROXY_URL=") == 1
+
+    def test_first_rerun_after_upgrade_refreshes_stale_duplicates(self, api, tmp_path):
+        """Migration scenario: a user who ran the old append-based CLI ends up
+        with several stacked ``MODEL_PROXY_API_KEY=`` lines in their ``.env``.
+        The first rerun on the new code must rewrite every duplicate to the
+        fresh value so no stale token lingers in the file."""
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "MODEL_PROXY_API_KEY=stale-1\n"
+            "OTHER=keep\n"
+            "MODEL_PROXY_API_KEY=stale-2\n"
+            "MODEL_PROXY_API_KEY=stale-3\n"
+        )
+        api._mock_client.models.model_proxy_api_client.create_default_model_proxy_token.return_value = (
+            _make_token_response(token="kaggle-benchmarks:fresh")
+        )
+        api.benchmarks_auth_cli(no_confirm=True, env_file=str(env_file))
+
+        content = env_file.read_text()
+        for stale in ("stale-1", "stale-2", "stale-3"):
+            assert stale not in content
+        from dotenv import dotenv_values
+
+        assert dotenv_values(str(env_file))["MODEL_PROXY_API_KEY"] == "kaggle-benchmarks:fresh"
+        assert "OTHER=keep\n" in content
+
+    def test_init_rerun_is_idempotent(self, api, mock_token, tmp_path):
+        env_file = str(tmp_path / ".env")
+        example_file = str(tmp_path / "example_task.py")
+        api.benchmarks_init_cli(no_confirm=True, env_file=env_file, example_file=example_file)
+        first = (tmp_path / ".env").read_text()
+        api.benchmarks_init_cli(no_confirm=True, env_file=env_file, example_file=example_file)
+        second = (tmp_path / ".env").read_text()
+        assert first == second
+        for key in (
+            "MODEL_PROXY_URL=",
+            "MODEL_PROXY_API_KEY=",
+            "MODEL_PROXY_EXPIRY_TIME=",
+            "LLM_DEFAULT=",
+            "LLM_DEFAULT_EVAL=",
+            "LLMS_AVAILABLE=",
+        ):
+            assert second.count(key) == 1
+
+
+# ============================================================
 # Expiry Formatting
 # ============================================================
 
