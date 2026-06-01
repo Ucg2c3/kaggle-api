@@ -7147,7 +7147,27 @@ class KaggleApi:
     def _fetch_model_proxy_env(self):
         with self.build_kaggle_client() as kaggle:
             request = ApiCreateDefaultModelProxyTokenRequest()
-            response = kaggle.models.model_proxy_api_client.create_default_model_proxy_token(request)
+            try:
+                response = kaggle.models.model_proxy_api_client.create_default_model_proxy_token(request)
+            except HTTPError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status == 404:
+                    raise ValueError(
+                        "Endpoint not found (404). Possible causes:\n"
+                        "  1. Kaggle Benchmarks is currently in beta and isn't enabled on your account.\n"
+                        "     Request access from the Kaggle Benchmarks team and try again once enabled.\n"
+                        "  2. Your Kaggle CLI may be out of date.\n"
+                        "     Upgrade with `pip install --upgrade kaggle` and re-run this command."
+                    ) from None
+                if status == 403:
+                    raise ValueError(
+                        "Authentication failed (403). Possible causes:\n"
+                        "  1. Your account is missing phone or identity verification.\n"
+                        "     Verify at https://www.kaggle.com/settings.\n"
+                        "  2. Your Kaggle API credentials are stale or invalid.\n"
+                        "     Regenerate at https://www.kaggle.com/settings/api and replace ~/.kaggle/access_token (or kaggle.json)."
+                    ) from None
+                raise
         return {
             "MODEL_PROXY_URL": response.base_uri,
             "MODEL_PROXY_API_KEY": response.token,
@@ -7350,20 +7370,9 @@ class KaggleApi:
             print(f"\nPushed {banner_subject}")
             print(f"   Task Details:  {url}")
 
-            # Report datasource attachment results
-            if kaggle_datasets:
-                attached = getattr(response, "options", None)
-                if attached and attached.dataset_data_sources:
-                    print(f"Attached Kaggle dataset(s): {', '.join(attached.dataset_data_sources)}")
-                invalid = getattr(response, "invalid_dataset_sources", None)
-                if invalid:
-                    msg = self._warn(
-                        f"⚠ Warning: The following Kaggle datasets could not be resolved: " f"{', '.join(invalid)}"
-                    )
-                    print(msg, file=sys.stderr)
-
             if wait is None:
                 print(f"   Model Output:  {model_output_url}")
+                self._print_attach_result(response, kaggle_datasets)
                 print("\nNext steps:")
                 print("   Check creation status:")
                 print(f"   $ kaggle b t status {task_slug}\n")
@@ -7375,9 +7384,22 @@ class KaggleApi:
                 if completed:
                     print("\nCompleted")
                     print(f"   Model Output:  {model_output_url}")
+                self._print_attach_result(response, kaggle_datasets)
+                if completed:
                     print("\nNext step:")
                     print("   Select models to run (or use -m to skip the menu):")
                     print(f"   $ kaggle b t run {task_slug}")
+
+    def _print_attach_result(self, response, kaggle_datasets):
+        if not kaggle_datasets:
+            return
+        attached = getattr(response, "options", None)
+        if attached and attached.dataset_data_sources:
+            print(f"Attached Kaggle dataset(s): {', '.join(attached.dataset_data_sources)}")
+        invalid = getattr(response, "invalid_dataset_sources", None)
+        if invalid:
+            msg = self._warn(f"⚠ Warning: The following Kaggle datasets could not be resolved: {', '.join(invalid)}")
+            print(msg, file=sys.stderr)
 
     def benchmarks_tasks_run_cli(self, task, model=None, wait=None, poll_interval=60, verbose=False):
         if poll_interval is not None and poll_interval <= 0:
