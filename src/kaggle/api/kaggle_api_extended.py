@@ -4385,6 +4385,7 @@ class KaggleApi:
             "enable_gpu": "false",
             "enable_tpu": "false",
             "enable_internet": "true",
+            "machine_shape": "",
             "dataset_sources": [],
             "competition_sources": [],
             "kernel_sources": [],
