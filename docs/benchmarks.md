@@ -271,6 +271,8 @@ kaggle benchmarks tasks status <TASK> [options]
 
 Prints the task's metadata (slug, creation status, creation time, URL) followed by a table of all runs. Each run row shows the model name, run state, start time, and end time. Any errored runs display their error messages below the table.
 
+If task creation itself failed, the `Status:` line shows the failure *kind* — the cleaned creation-state enum, titlecased (e.g. `Kernel_Without_Run`, `No_Model_Specified`, `Validation_Failed`, `Errored`) — and an `Error:` line is appended below it with the server-provided `creation_error_message` explaining what went wrong.
+
 ---
 
 ### `kaggle benchmarks tasks download`

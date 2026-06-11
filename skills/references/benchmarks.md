@@ -277,14 +277,14 @@ kaggle b t status my-task -m gemini-2.5-pro -m claude-sonnet-4
 **Output format:**
 ```
 Task:     my-task
-Status:   COMPLETED
+Status:   Completed
 Created:  2026-04-28 18:13:04
 Task URL: https://www.kaggle.com/...
 
 Model                     Status      Started               Ended
 --------------------------------------------------------------------------
-gemini-2.5-pro            COMPLETED   2026-04-28 18:13:04   2026-04-28 18:14:00
-claude-sonnet-4           ERRORED     2026-04-28 18:13:04   2026-04-28 18:13:04
+gemini-2.5-pro            Completed   2026-04-28 18:13:04   2026-04-28 18:14:00
+claude-sonnet-4           Errored     2026-04-28 18:13:04   2026-04-28 18:13:04
 
 Errors:
   [claude-sonnet-4]
@@ -294,6 +294,22 @@ Errors:
 ```
 
 If no runs exist: `No runs yet. Use 'kaggle b t run my-task' to start one.`
+
+**Task creation failures:** When the task itself failed to be created
+(e.g. `KERNEL_WITHOUT_RUN`, `NO_MODEL_SPECIFIED`, `VALIDATION_FAILED`,
+`ERRORED`), the `Status:` line shows the failure *kind* (titlecased
+enum) and an `Error:` line is appended below it with the server-provided
+`creation_error_message` — for example:
+
+```
+Status:   Kernel_Without_Run
+Error:    Notebook finished but produced no output. Did you forget to call .run() or .evaluate()?
+```
+
+The `kaggle b t run` command applies the same pattern when refusing to
+schedule runs against a non-completed task: the raised error includes
+`status: <KIND>` and, if present, an `Error: <message>` line with the
+server's explanation.
 
 ### `kaggle benchmarks tasks download`
 

@@ -566,11 +566,25 @@ class TestRun:
         with pytest.raises(ValueError, match="--poll-interval must be a positive integer"):
             api.benchmarks_tasks_run_cli("my-task", ["gemini-pro"], poll_interval=interval)
 
-    def test_run_errored_task_includes_task_info(self, api):
-        """ERRORED task error message includes task info."""
-        api._mock_benchmarks.get_benchmark_task.return_value = _make_task(state=ERRORED)
-        with pytest.raises(ValueError, match="Task Info:"):
+    def test_run_errored_task_surfaces_creation_error_message(self, api):
+        """When task creation failed, run shows status (kind) and Error (server message) separately."""
+        task = _make_task(state=ERRORED)
+        task.creation_error_message = "Notebook produced no run output"
+        api._mock_benchmarks.get_benchmark_task.return_value = task
+        with pytest.raises(ValueError) as exc_info:
             api.benchmarks_tasks_run_cli("my-task", ["gemini-pro"])
+        msg = str(exc_info.value)
+        assert "status: ERRORED" in msg
+        assert "Error: Notebook produced no run output" in msg
+
+    def test_run_errored_task_without_creation_error_message(self, api):
+        """When creation_error_message is empty, no Error line is appended."""
+        api._mock_benchmarks.get_benchmark_task.return_value = _make_task(state=ERRORED)
+        with pytest.raises(ValueError) as exc_info:
+            api.benchmarks_tasks_run_cli("my-task", ["gemini-pro"])
+        msg = str(exc_info.value)
+        assert "status: ERRORED" in msg
+        assert "Error:" not in msg
 
     @pytest.mark.parametrize("status_code", [403, 404], ids=["forbidden", "not_found"])
     def test_run_task_not_found(self, api, status_code):
@@ -1085,6 +1099,59 @@ class TestStatus:
         output = capsys.readouterr().out
         assert "gemini-1" in output
         assert "gemini-2" in output
+
+    def test_status_shows_creation_error_message(self, api, capsys):
+        """Failed task creation surfaces creation_error_message in the header."""
+        task = _make_task(state=ERRORED)
+        task.creation_error_message = "Kernel produced no run output"
+        api._mock_benchmarks.get_benchmark_task.return_value = task
+        _setup_runs_response(api, [])
+        api.benchmarks_tasks_status_cli("my-task")
+        output = capsys.readouterr().out
+        assert "Error:    Kernel produced no run output" in output
+
+    def test_status_omits_error_when_empty(self, api, capsys):
+        """No Error line when creation_error_message is empty."""
+        api._mock_benchmarks.get_benchmark_task.return_value = _make_task()
+        _setup_runs_response(api, [])
+        api.benchmarks_tasks_status_cli("my-task")
+        output = capsys.readouterr().out
+        assert "Error:" not in output
+
+
+class TestFormatState:
+    """``KaggleApi._format_state`` renders the raw cleaned enum (the error *kind*).
+
+    Explanatory messages belong in ``creation_error_message`` on the task
+    object and are displayed by callers as a separate ``Error:`` line.
+    """
+
+    @pytest.mark.parametrize(
+        "state, expected",
+        [
+            (COMPLETED, "Completed"),
+            (QUEUED, "Queued"),
+            (RUNNING, "Running"),
+            (ERRORED, "Errored"),
+        ],
+    )
+    def test_known_creation_states(self, state, expected):
+        assert KaggleApi._format_state(state) == expected
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("KERNEL_WITHOUT_RUN", "Kernel_Without_Run"),
+            ("NO_MODEL_SPECIFIED", "No_Model_Specified"),
+            ("VALIDATION_FAILED", "Validation_Failed"),
+            ("ERRORED", "Errored"),
+            ("COMPLETED", "Completed"),
+            ("SOMETHING_NEW", "Something_New"),
+            ("PENDING", "Pending"),
+        ],
+    )
+    def test_renders_cleaned_enum(self, raw, expected):
+        assert KaggleApi._format_state(raw) == expected
 
 
 # ============================================================

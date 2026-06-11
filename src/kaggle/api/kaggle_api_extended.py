@@ -6995,7 +6995,7 @@ class KaggleApi:
 
     @staticmethod
     def _format_state(state) -> str:
-        """Render an enum state in Titlecase (e.g. ``Completed``)."""
+        """Render an enum state in Titlecase (e.g. ``Completed``, ``Kernel_Without_Run``)."""
         return KaggleApi._clean_enum_str(state).title()
 
     @staticmethod
@@ -7687,8 +7687,8 @@ class KaggleApi:
                     f"Task '{task}' is not ready to run (status: {self._clean_enum_str(state)}). "
                     f"Only completed tasks can be run."
                 )
-                if state == self._TASK_CREATION_ERRORED:
-                    error_msg += f"\n  Task Info: {task_info}"
+                if task_info.creation_error_message:
+                    error_msg += f"\n  Error: {task_info.creation_error_message}"
                 raise ValueError(error_msg)
 
             if not models:
@@ -7799,6 +7799,8 @@ class KaggleApi:
             version = task_info.slug.version_number or "unset"
             print(f"Version:  {version}")
             print(f"Status:   {self._format_state(task_info.creation_state)}")
+            if task_info.creation_error_message:
+                print(f"Error:    {task_info.creation_error_message}")
             print(f"Created:  {self._format_time(task_info.create_time)}")
             print(f"Public:   {getattr(task_info, 'is_public', False)}")
             url = getattr(task_info, "url", None)
