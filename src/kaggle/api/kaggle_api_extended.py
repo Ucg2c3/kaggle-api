@@ -5685,7 +5685,7 @@ class KaggleApi:
         else:
             print("Model creation error: " + result.error)
 
-    def model_delete(self, model: str, no_confirm: bool) -> ApiDeleteModelResponse:
+    def model_delete(self, model: str, no_confirm: bool) -> Optional[ApiDeleteModelResponse]:
         """Deletes a model.
 
         Args:
@@ -5693,14 +5693,14 @@ class KaggleApi:
             no_confirm (bool): If True, skip confirmation (default is False).
 
         Returns:
-            ApiDeleteModelResponse: An ApiDeleteModelResponse object.
+            Optional[ApiDeleteModelResponse]: The delete response, or None if cancelled.
         """
         owner_slug, model_slug = self.split_model_string(model)
 
         if not no_confirm:
             if not self.confirmation(f"delete the model {model}"):
                 print("Deletion cancelled")
-                return ApiDeleteModelResponse()
+                return None
 
         with self.build_kaggle_client() as kaggle:
             request = ApiDeleteModelRequest()
@@ -5717,6 +5717,8 @@ class KaggleApi:
             no_confirm: If True, automatically confirm the deletion.
         """
         result = self.model_delete(model, no_confirm)
+        if result is None:
+            return
 
         if result.error:
             print("Model deletion error: " + result.error)
@@ -6020,7 +6022,7 @@ class KaggleApi:
         else:
             print("Model instance creation error: " + result.error)
 
-    def model_instance_delete(self, model_instance: str, no_confirm: bool = False) -> ApiDeleteModelResponse:
+    def model_instance_delete(self, model_instance: str, no_confirm: bool = False) -> Optional[ApiDeleteModelResponse]:
         """Deletes a model instance.
 
         Args:
@@ -6028,7 +6030,7 @@ class KaggleApi:
             no_confirm (bool): If True, skip confirmation (default is False).
 
         Returns:
-            ApiDeleteModelResponse: An ApiDeleteModelResponse object.
+            Optional[ApiDeleteModelResponse]: The delete response, or None if cancelled.
         """
         if model_instance is None:
             raise ValueError("A model instance must be specified")
@@ -6037,7 +6039,7 @@ class KaggleApi:
         if not no_confirm:
             if not self.confirmation(f"delete the variation {model_instance}"):
                 print("Deletion cancelled")
-                return ApiDeleteModelResponse()
+                return None
 
         with self.build_kaggle_client() as kaggle:
             request = ApiDeleteModelInstanceRequest()
@@ -6057,6 +6059,8 @@ class KaggleApi:
             no_confirm: If True, automatically confirm the deletion.
         """
         result = self.model_instance_delete(model_instance, no_confirm)
+        if result is None:
+            return
 
         if len(result.error) > 0:
             print("Model instance deletion error: " + result.error)
@@ -6518,7 +6522,7 @@ class KaggleApi:
 
     def model_instance_version_delete(
         self, model_instance_version: str, no_confirm: bool = False
-    ) -> ApiDeleteModelResponse:
+    ) -> Optional[ApiDeleteModelResponse]:
         """Deletes a model instance version.
 
         Args:
@@ -6526,7 +6530,7 @@ class KaggleApi:
             no_confirm (bool): If True, skip confirmation (default is False).
 
         Returns:
-            ApiDeleteModelResponse: An ApiDeleteModelResponse object.
+            Optional[ApiDeleteModelResponse]: The delete response, or None if cancelled.
         """
         if model_instance_version is None:
             raise ValueError("A model instance version must be specified")
@@ -6542,7 +6546,7 @@ class KaggleApi:
         if not no_confirm:
             if not self.confirmation(f"delete the version {model_instance_version}"):
                 print("Deletion cancelled")
-                return ApiDeleteModelResponse()
+                return None
 
         request = ApiDeleteModelInstanceVersionRequest()
         request.owner_slug = owner_slug
@@ -6564,6 +6568,8 @@ class KaggleApi:
             no_confirm: If True, automatically confirm the deletion.
         """
         result = self.model_instance_version_delete(model_instance_version, no_confirm)
+        if result is None:
+            return
 
         if len(result.error) > 0:
             print("Model instance version deletion error: " + result.error)
