@@ -98,6 +98,8 @@ from kagglesdk.competitions.types.competition_api_service import (
     ApiGetEpisodeAgentLogsRequest,
     ApiListCompetitionPagesRequest,
     ApiListCompetitionPagesResponse,
+    ApiCreateCompetitionPageRequest,
+    ApiCompetitionPage,
     ApiListCompetitionTopicsRequest,
     ApiListCompetitionTopicsResponse,
     ApiListTopicMessagesRequest,
@@ -2340,6 +2342,86 @@ class KaggleApi:
             )
         else:
             print("No pages found")
+
+    def competition_create_page(
+        self,
+        competition_name: str,
+        page_name: str,
+        content_path: str,
+        mime_type: Optional[str] = None,
+        post_title: Optional[str] = None,
+        publish: bool = False,
+    ) -> ApiCompetitionPage:
+        """Create a new page on a competition you host.
+
+        Args:
+            competition_name (str): The competition name (slug).
+            page_name (str): Page name (e.g. "description", "rules", "evaluation").
+            content_path (str): Path to a file whose contents become the page body.
+            mime_type (Optional[str]): MIME type of the content. Defaults to "text/html"
+                server-side if omitted.
+            post_title (Optional[str]): Title shown above the content. Defaults to
+                ``page_name`` server-side if omitted.
+            publish (bool): If True, publish the page immediately (default: staged
+                as unpublished).
+
+        Returns:
+            ApiCompetitionPage: the created page.
+        """
+        if not os.path.isfile(content_path):
+            raise ValueError("Content file not found: " + content_path)
+        with open(content_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        page = ApiCompetitionPage()
+        page.name = page_name
+        page.content = content
+        if mime_type is not None:
+            page.mime_type = mime_type
+        if post_title is not None:
+            page.post_title = post_title
+        page.is_published = publish
+
+        with self.build_kaggle_client() as kaggle:
+            request = ApiCreateCompetitionPageRequest()
+            request.competition_name = competition_name
+            request.page = page
+            return kaggle.competitions.competition_api_client.create_competition_page(request)
+
+    def competition_create_page_cli(
+        self,
+        competition=None,
+        competition_opt=None,
+        page_name=None,
+        file_path=None,
+        mime_type=None,
+        post_title=None,
+        publish=False,
+        quiet=False,
+    ):
+        """CLI wrapper for competition_create_page."""
+        competition_name = competition or competition_opt
+        if competition_name is None:
+            competition_name = self.get_config_value(self.CONFIG_NAME_COMPETITION)
+            if competition_name is not None and not quiet:
+                print("Using competition: " + competition_name)
+        if competition_name is None:
+            raise ValueError("No competition specified")
+        if not page_name:
+            raise ValueError("--page-name is required")
+        if not file_path:
+            raise ValueError("-f/--file is required")
+
+        page = self.competition_create_page(
+            competition_name=competition_name,
+            page_name=page_name,
+            content_path=file_path,
+            mime_type=mime_type,
+            post_title=post_title,
+            publish=publish,
+        )
+        status = "published" if page.is_published else "staged (unpublished)"
+        print(f'Page "{page.name}" created on competition "{competition_name}" — {status}.')
 
     def competition_list_topics(self, competition: str, sort_by: Optional[str] = None, page: Optional[int] = None):
         """List discussion topics for a competition.
