@@ -1167,7 +1167,15 @@ class KaggleApi:
         Returns:
             bool: True if valid
         """
-        return api_command.endswith(("-h", "--help", "-v", "--version"))
+        argv = sys.argv[1:]
+        if not argv:
+            return False
+        # Top-level only: kaggle -v, kaggle --version, kaggle -h, kaggle --help
+        if len(argv) == 1 and argv[0] in ("-h", "--help", "-v", "--version"):
+            return True
+        # Subcommand help only. Do not treat trailing -v as version: many commands use
+        # -v as the --csv output-format alias (e.g. kaggle quota -v).
+        return api_command.endswith(("-h", "--help"))
 
     def read_config_environment(self, config_data: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         """Reads config values from environment variables.
