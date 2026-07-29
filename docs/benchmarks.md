@@ -79,7 +79,8 @@ In addition to the three credential variables written by `auth`, `init` also wri
 *   `LLM_DEFAULT_EVAL` — Default model slug for evaluation.
 *   `LLMS_AVAILABLE` — Comma-separated list of available model slugs.
 
-> **Note:** `LLMS_AVAILABLE` is a curated subset of models intended for local development and testing — it is **not** the full set of available models, and the Model Proxy token itself is not restricted to these models. To see all available models, use `kaggle benchmarks tasks models`. To run a task against any model (including those not in `LLMS_AVAILABLE`), use `kaggle benchmarks tasks run`, which executes on Kaggle's infrastructure with access to the full model catalog.
+> [!WARNING]
+> `LLMS_AVAILABLE` is a curated subset of models intended for local development and testing — it is **not** the full set of available models, and the Model Proxy token minted for local development **is** restricted to these models. To see all available models, use `kaggle benchmarks tasks models`. To run a task against any model (including those not in `LLMS_AVAILABLE`), use `kaggle benchmarks tasks run`, which executes on Kaggle's infrastructure with access to the full model catalog.
 
 `init` also creates two files alongside the example file:
 
@@ -217,7 +218,8 @@ kaggle benchmarks tasks push <TASK> -f <FILE> [options]
 
 This command reads a `.py` file, converts it to a Jupyter notebook format, and uploads it to Kaggle as a benchmark task. If a task with the same slug already exists, a new version is created. The file is validated to ensure it contains a `@task` decorator matching the given task name.
  
-**Note on dataset attachment:** When `--kaggle-dataset` / `-d` is specified, the listed datasets are attached to the task's underlying notebook kernel. During execution, they are accessible at `/kaggle/input/<dataset-slug>/` by default, falling back to `/kaggle/input/<owner>/<dataset-slug>/` in the event of a naming conflict. If you re-push without `-d`, all previously-attached datasets are detached (a warning is printed). To preserve datasets across pushes, re-specify them each time. If any specified dataset is invalid, non-existent, or inaccessible, the push command will **fail** with an error: `Failed to push task: Failed to attach the following data sources (not found or inaccessible): <dataset>`.
+> [!NOTE]
+> **On dataset attachment:** When `--kaggle-dataset` / `-d` is specified, the listed datasets are attached to the task's underlying notebook kernel. During execution, they are accessible at `/kaggle/input/<dataset-slug>/` by default, falling back to `/kaggle/input/<owner>/<dataset-slug>/` in the event of a naming conflict. If you re-push without `-d`, all previously-attached datasets are detached (a warning is printed). To preserve datasets across pushes, re-specify them each time. If any specified dataset is invalid, non-existent, or inaccessible, the push command will **fail** with an error: `Failed to push task: Failed to attach the following data sources (not found or inaccessible): <dataset>`.
 
 ---
 
